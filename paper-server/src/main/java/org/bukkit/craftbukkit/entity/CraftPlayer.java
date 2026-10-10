@@ -8,6 +8,7 @@ import com.google.common.io.BaseEncoding;
 import com.mojang.authlib.GameProfile;
 import com.mojang.datafixers.util.Pair;
 import io.papermc.paper.FeatureHooks;
+import io.papermc.paper.block.BlockHidingPredicate;
 import io.papermc.paper.connection.PlayerGameConnection;
 import io.papermc.paper.connection.PluginMessageBridgeImpl;
 import io.papermc.paper.dialog.Dialog;
@@ -42,6 +43,8 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.WeakHashMap;
 import java.util.concurrent.CompletableFuture;
+import java.util.function.BiPredicate;
+import java.util.function.Predicate;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 import java.util.stream.Collectors;
@@ -234,6 +237,11 @@ public class CraftPlayer extends CraftHumanEntity implements Player, PluginMessa
     private BorderChangeListener clientWorldBorderListener = this.createWorldBorderListener();
     private long lastSaveTime; // Paper - getLastPlayed replacement API
     private final TechhiderPDC techhiderPDC;
+
+    private boolean xray;
+    private BlockHidingPredicate hideTechIf;
+    private Predicate<Player> hideSelfIf;
+    private Collection<? extends Player> disallowedViewer;
 
     public CraftPlayer(CraftServer server, ServerPlayer entity) {
         super(server, entity);
@@ -3196,6 +3204,36 @@ public class CraftPlayer extends CraftHumanEntity implements Player, PluginMessa
     // resetTitle implemented above
 
     private @Nullable Set<net.kyori.adventure.bossbar.BossBar> activeBossBars;
+
+    @Override
+    public void toggleXray(final boolean xray) {
+        this.xray = xray;
+    }
+
+    @Override
+    public void hideTechIf(final BlockHidingPredicate hideTechIf) {
+        this.hideTechIf = hideTechIf;
+    }
+
+    public BlockHidingPredicate getHideTechIf() {
+        return hideTechIf;
+    }
+
+    @Override
+    public void hideSelfIf(final Predicate<Player> hideSelfIf, final Collection<? extends Player> disallowedViewer) {
+        this.hideSelfIf = hideSelfIf;
+        this.disallowedViewer = disallowedViewer;
+    }
+
+    @Override
+    public void recalculateTechHider() {
+
+    }
+
+    @Override
+    public void recalculateSelfHider() {
+
+    }
 
     @Override
     public @NonNull Iterable<? extends net.kyori.adventure.bossbar.BossBar> activeBossBars() {

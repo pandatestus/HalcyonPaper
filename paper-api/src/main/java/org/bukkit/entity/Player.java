@@ -1,5 +1,6 @@
 package org.bukkit.entity;
 
+import io.papermc.paper.block.BlockHidingPredicate;
 import io.papermc.paper.connection.PlayerGameConnection;
 import io.papermc.paper.entity.LookAnchor;
 import io.papermc.paper.entity.PlayerGiveResult;
@@ -14,6 +15,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
+import java.util.function.Consumer;
+import java.util.function.Predicate;
 import org.bukkit.BanEntry;
 import org.bukkit.DyeColor;
 import org.bukkit.Effect;
@@ -70,6 +73,12 @@ public interface Player extends HumanEntity, Conversable, OfflinePlayer, PluginM
     default net.kyori.adventure.identity.Identity identity() {
         return net.kyori.adventure.identity.Identity.identity(this.getUniqueId());
     }
+
+    void toggleXray(boolean xray);
+    void hideTechIf(BlockHidingPredicate hideTechIf);
+    void hideSelfIf(Predicate<Player> hideSelfIf, Collection<? extends Player> disallowedViewer);
+    void recalculateTechHider();
+    void recalculateSelfHider();
 
     /**
      * Gets an unmodifiable view of all known currently active bossbars.
