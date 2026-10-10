@@ -598,7 +598,6 @@ public final class CraftServer implements Server {
         if (type == PluginLoadOrder.STARTUP) {
             this.helpMap.clear();
             this.helpMap.initializeGeneralTopics();
-            if (io.papermc.paper.configuration.GlobalConfiguration.get().misc.loadPermissionsYmlBeforePlugins) loadCustomPermissions(); // Paper
         }
 
         Plugin[] plugins = this.pluginManager.getPlugins();
@@ -615,7 +614,6 @@ public final class CraftServer implements Server {
             // Spigot end
             DefaultPermissions.registerCorePermissions();
             CraftDefaultPermissions.registerCorePermissions();
-            if (!io.papermc.paper.configuration.GlobalConfiguration.get().misc.loadPermissionsYmlBeforePlugins) this.loadCustomPermissions(); // Paper
             this.helpMap.initializeCommands();
             this.syncCommands();
         }
@@ -3067,7 +3065,6 @@ public final class CraftServer implements Server {
     @Override
     public void reloadPermissions() {
         pluginManager.clearPermissions();
-        if (io.papermc.paper.configuration.GlobalConfiguration.get().misc.loadPermissionsYmlBeforePlugins) loadCustomPermissions();
         for (Plugin plugin : pluginManager.getPlugins()) {
             for (Permission perm : plugin.getDescription().getPermissions()) {
                 try {
@@ -3077,7 +3074,6 @@ public final class CraftServer implements Server {
                 }
             }
         }
-        if (!io.papermc.paper.configuration.GlobalConfiguration.get().misc.loadPermissionsYmlBeforePlugins) loadCustomPermissions();
         DefaultPermissions.registerCorePermissions();
         CraftDefaultPermissions.registerCorePermissions();
     }

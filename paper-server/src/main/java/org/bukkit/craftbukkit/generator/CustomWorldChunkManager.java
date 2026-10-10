@@ -48,10 +48,7 @@ public class CustomWorldChunkManager extends BiomeSource {
 
     @Override
     public Holder<net.minecraft.world.level.biome.Biome> getNoiseBiome(int x, int y, int z, Climate.Sampler noise) {
-        Biome biome = this.biomeProvider.getBiome(this.worldInfo, x << 2, y << 2, z << 2, CraftBiomeParameterPoint.createBiomeParameterPoint(noise, noise.sample(x, y, z)));
-        Preconditions.checkArgument(biome != Biome.CUSTOM, "Cannot set the biome to %s", biome);
-
-        return CraftBiome.bukkitToMinecraftHolder(biome);
+        return org.bukkit.craftbukkit.block.CraftBiome.bukkitToMinecraftHolder(org.bukkit.block.Biome.THE_VOID);
     }
 
     @Override
