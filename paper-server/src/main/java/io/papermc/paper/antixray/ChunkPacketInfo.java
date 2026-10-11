@@ -1,7 +1,7 @@
 package io.papermc.paper.antixray;
 
 import net.minecraft.network.protocol.game.ClientboundLevelChunkWithLightPacket;
-import net.minecraft.server.level.Techhider;
+import org.bukkit.craftbukkit.BlockHider;
 import net.minecraft.world.level.chunk.LevelChunk;
 import net.minecraft.world.level.chunk.Palette;
 
@@ -68,7 +68,7 @@ public class ChunkPacketInfo<T> {
 
     @SuppressWarnings("unchecked")
     public T[] getPresetValues(int chunkSectionIndex) {
-        return (T[]) Techhider.getHiderPreset();
+        return (T[]) BlockHider.getHiderPreset();
     }
 
     public void setPresetValues(int chunkSectionIndex, T[] presetValues) {

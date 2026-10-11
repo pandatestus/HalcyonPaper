@@ -1,14 +1,13 @@
 package io.papermc.paper.antixray;
 
 import it.unimi.dsi.fastutil.shorts.ShortArrayList;
-import it.unimi.dsi.fastutil.shorts.ShortArraySet;
-import it.unimi.dsi.fastutil.shorts.ShortOpenHashSet;
-import it.unimi.dsi.fastutil.shorts.ShortSet;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeUnit;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.core.SectionPos;
-import net.minecraft.network.protocol.game.ClientboundBlockUpdatePacket;
-import net.minecraft.network.protocol.game.ClientboundLevelChunkPacketData;
 import net.minecraft.network.protocol.game.ClientboundLevelChunkWithLightPacket;
 import net.minecraft.network.protocol.game.ClientboundSectionBlocksUpdatePacket;
 import net.minecraft.network.protocol.game.ServerboundPlayerActionPacket;
@@ -16,30 +15,32 @@ import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.server.level.ServerPlayerGameMode;
-import net.minecraft.server.level.Techhider;
 import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.Level;
+import net.minecraft.world.level.block.Block;
 import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.level.block.state.properties.BlockStateProperties;
+import net.minecraft.world.level.chunk.GlobalPalette;
 import net.minecraft.world.level.chunk.LevelChunk;
 import net.minecraft.world.level.chunk.LevelChunkSection;
 import net.minecraft.world.level.chunk.Palette;
 import net.minecraft.world.level.chunk.PalettedContainer;
 import org.bukkit.Material;
-import java.util.ArrayList;
-import java.util.List;
-import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.TimeUnit;
+import org.bukkit.craftbukkit.BlockHider;
+import org.bukkit.craftbukkit.CraftCoreHider;
+import org.bukkit.craftbukkit.entity.CraftPlayer;
 
 public class ChunkPacketBlockController {
 
     public static final ChunkPacketBlockController NO_OPERATION_INSTANCE = new ChunkPacketBlockController();
+    private static final Palette<BlockState> GLOBAL_BLOCKSTATE_PALETTE = new GlobalPalette<>(Block.BLOCK_STATE_REGISTRY);
 
     protected ChunkPacketBlockController() {
     }
 
     public BlockState[] getPresetBlockStates(Level level, ChunkPos chunkPos, int chunkSectionY) {
-        return new BlockState[]{Techhider.ENDSTONE, Blocks.STRUCTURE_VOID.defaultBlockState()};
+        return new BlockState[]{Blocks.END_STONE.defaultBlockState(), Blocks.STRUCTURE_VOID.defaultBlockState()};
     }
 
     public boolean shouldModify(ServerPlayer player, LevelChunk chunk) {
@@ -66,18 +67,20 @@ public class ChunkPacketBlockController {
             return;
         }
 
-        Techhider techhider = player.getBukkitEntity().getTechhider();
+        CraftCoreHider coreHider = MinecraftServer.getServer().server.getCoreHider();
 
         BitStorageReader bitStorageReader = new BitStorageReader();
         BitStorageWriter bitStorageWriter = new BitStorageWriter();
         LevelChunk chunk = chunkPacketInfo.getChunk();
 
-        if(!techhider.shouldHideChunk(chunk)) return;
+        // if(!techhider.shouldHideChunk(chunk)) return;
 
         int maxChunkSectionIndex = chunk.getSectionsCount() - 1;
 
         bitStorageReader.setBuffer(chunkPacketInfo.getBuffer());
         bitStorageWriter.setBuffer(chunkPacketInfo.getBuffer());
+
+        BlockState disguiseState = BlockHider.getState(player.getBukkitEntity());
 
         for (int chunkSectionIndex = 0; chunkSectionIndex <= maxChunkSectionIndex; chunkSectionIndex++) {
 
@@ -94,21 +97,18 @@ public class ChunkPacketBlockController {
             int[] remap = new int[paletteSize];
             int disguiseIndex = -1;
 
-            BlockState disguiseState = techhider.getObfuscationState();
-            for(int disguiseI = 0; disguiseI < paletteSize; disguiseI++) {
-                if(palette.valueFor(disguiseI).getBukkitMaterial().name().equalsIgnoreCase(disguiseState.getBukkitMaterial().name())) {
+            for (int disguiseI = 0; disguiseI < paletteSize; disguiseI++) {
+                if (palette.valueFor(disguiseI).getBukkitMaterial().name().equalsIgnoreCase(disguiseState.getBukkitMaterial().name())) {
                     disguiseIndex = disguiseI;
                     break;
                 }
             }
 
-            if(disguiseIndex == -1) {
-                disguiseIndex = 0;
-
+            if (disguiseIndex == -1) {
                 ShortArrayList positions = new ShortArrayList();
-                BlockState[] newStates = collectHiddenBlocksInSection(chunk, chunkSectionIndex, section, techhider, positions);
+                BlockState[] newStates = collectHiddenBlocksInSection(player.getBukkitEntity(), coreHider, chunk, chunkSectionIndex, section, disguiseState, positions);
 
-                if(!positions.isEmpty() && techhider.shouldHideChunk(chunk)) {
+                if (!positions.isEmpty()) {
                     SectionPos sectionPos = SectionPos.of(chunk.getPos(), chunk.getSectionYFromSectionIndex(chunkSectionIndex));
 
                     ClientboundSectionBlocksUpdatePacket updatePacket = new ClientboundSectionBlocksUpdatePacket(sectionPos, positions.toShortArray(), newStates);
@@ -117,6 +117,7 @@ public class ChunkPacketBlockController {
                         MinecraftServer.getServer().execute(() -> player.connection.send(updatePacket));
                     });
                 }
+                disguiseIndex = 0;
             }
 
             bitStorageReader.setBits(chunkPacketInfo.getBits(chunkSectionIndex));
@@ -139,7 +140,10 @@ public class ChunkPacketBlockController {
                 );
 
                 int newIndex;
-                if (techhider.isHidden(state) || techhider.getHullHider().shouldFillEndstone(worldPos)) {
+                Material material = state.getBukkitMaterial();
+                if (state.hasProperty(BlockStateProperties.WATERLOGGED) && state.getValue(BlockStateProperties.WATERLOGGED))
+                    material = Material.WATER;
+                if (BlockHider.shouldHide(player.getBukkitEntity(), material, worldPos) || coreHider.shouldHideCore(worldPos, player.getUUID())) {
                     newIndex = disguiseIndex;
                 } else {
                     newIndex = originalIndex;
@@ -152,19 +156,22 @@ public class ChunkPacketBlockController {
         }
     }
 
-    private BlockState[] collectHiddenBlocksInSection(LevelChunk chunk, int chunkSectionIndex, LevelChunkSection section, Techhider techhider, ShortArrayList positions) {
-        BlockState disguise = techhider.getObfuscationState();
+    private BlockState[] collectHiddenBlocksInSection(CraftPlayer player, CraftCoreHider coreHider, LevelChunk chunk, int chunkSectionIndex, LevelChunkSection section, BlockState disguise, ShortArrayList positions) {
         List<BlockState> states = new ArrayList<>();
 
         int baseX = chunk.getPos().x << 4;
         int baseZ = chunk.getPos().z << 4;
         int baseY = chunk.getSectionYFromSectionIndex(chunkSectionIndex) << 4;
 
-        for(int x = 0; x < 16; x++) {
-            for(int y = 0; y < 16; y++) {
-                for(int z = 0; z < 16; z++) {
+        for (int x = 0; x < 16; x++) {
+            for (int y = 0; y < 16; y++) {
+                for (int z = 0; z < 16; z++) {
                     BlockState state = section.getBlockState(x, y, z);
-                    if(techhider.isHidden(state) || techhider.getHullHider().shouldFillEndstone(new BlockPos(baseX + x, baseY + y, baseZ + z))) {
+                    BlockPos pos = new BlockPos(x, y, z);
+                    Material material = state.getBukkitMaterial();
+                    if (state.hasProperty(BlockStateProperties.WATERLOGGED) && state.getValue(BlockStateProperties.WATERLOGGED))
+                        material = Material.WATER;
+                    if (BlockHider.shouldHide(player, material, pos) || coreHider.shouldHideCore(new BlockPos(baseX + x, baseY + y, baseZ + z), player.getUniqueId())) {
                         states.add(disguise);
                         positions.add((short) ((x << 8) | (z << 4) | y));
                     }
@@ -195,7 +202,7 @@ public class ChunkPacketBlockController {
     private void updateBlock(Level level, BlockPos blockPos) {
         BlockState blockState = level.getBlockStateIfLoaded(blockPos);
 
-        if (blockState != null && Techhider.isStateHidden(blockState)) {
+        if (blockState != null) {
             ((ServerLevel) level).getChunkSource().blockChanged(blockPos);
         }
     }

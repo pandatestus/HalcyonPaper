@@ -43,8 +43,6 @@ import java.util.Set;
 import java.util.UUID;
 import java.util.WeakHashMap;
 import java.util.concurrent.CompletableFuture;
-import java.util.function.BiPredicate;
-import java.util.function.Predicate;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 import java.util.stream.Collectors;
@@ -104,7 +102,7 @@ import net.minecraft.server.PlayerAdvancements;
 import net.minecraft.server.level.ChunkMap;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
-import net.minecraft.server.level.Techhider;
+import net.minecraft.server.network.PlayerChunkSender;
 import net.minecraft.server.network.ServerGamePacketListenerImpl;
 import net.minecraft.server.players.UserWhiteListEntry;
 import net.minecraft.sounds.SoundEvent;
@@ -120,6 +118,7 @@ import net.minecraft.world.level.block.Blocks;
 import net.minecraft.world.level.block.entity.SignBlockEntity;
 import net.minecraft.world.level.block.entity.SignText;
 import net.minecraft.world.level.border.BorderChangeListener;
+import net.minecraft.world.level.chunk.LevelChunk;
 import net.minecraft.world.level.saveddata.maps.MapDecoration;
 import net.minecraft.world.level.saveddata.maps.MapId;
 import net.minecraft.world.level.saveddata.maps.MapItemSavedData;
@@ -181,8 +180,6 @@ import org.bukkit.craftbukkit.inventory.CraftRecipe;
 import org.bukkit.craftbukkit.map.CraftMapCursor;
 import org.bukkit.craftbukkit.map.CraftMapView;
 import org.bukkit.craftbukkit.map.RenderData;
-import org.bukkit.craftbukkit.persistence.CraftPersistentDataContainer;
-import org.bukkit.craftbukkit.persistence.TechhiderPDC;
 import org.bukkit.craftbukkit.potion.CraftPotionEffectType;
 import org.bukkit.craftbukkit.potion.CraftPotionUtil;
 import org.bukkit.craftbukkit.scoreboard.CraftScoreboard;
@@ -236,22 +233,14 @@ public class CraftPlayer extends CraftHumanEntity implements Player, PluginMessa
     private CraftWorldBorder clientWorldBorder = null;
     private BorderChangeListener clientWorldBorderListener = this.createWorldBorderListener();
     private long lastSaveTime; // Paper - getLastPlayed replacement API
-    private final TechhiderPDC techhiderPDC;
 
     private boolean xray;
     private BlockHidingPredicate hideTechIf;
-    private Predicate<Player> hideSelfIf;
-    private Collection<? extends Player> disallowedViewer;
 
     public CraftPlayer(CraftServer server, ServerPlayer entity) {
         super(server, entity);
 
         this.firstPlayed = System.currentTimeMillis();
-        this.techhiderPDC = new TechhiderPDC(super.getPersistentDataContainer(), Techhider.getInstance(entity));
-    }
-
-    public Techhider getTechhider() {
-        return techhiderPDC.techhider();
     }
 
     @Override
@@ -411,11 +400,6 @@ public class CraftPlayer extends CraftHumanEntity implements Player, PluginMessa
         for (String message : messages) {
             this.sendMessage(message);
         }
-    }
-
-    @Override
-    public CraftPersistentDataContainer getPersistentDataContainer() {
-        return techhiderPDC;
     }
 
     @Override
@@ -3208,11 +3192,17 @@ public class CraftPlayer extends CraftHumanEntity implements Player, PluginMessa
     @Override
     public void toggleXray(final boolean xray) {
         this.xray = xray;
+        recalculateTechHider();
+    }
+
+    public boolean hasXray() {
+        return xray;
     }
 
     @Override
-    public void hideTechIf(final BlockHidingPredicate hideTechIf) {
+    public void hideTechIf(@Nullable final BlockHidingPredicate hideTechIf) {
         this.hideTechIf = hideTechIf;
+        recalculateTechHider();
     }
 
     public BlockHidingPredicate getHideTechIf() {
@@ -3220,19 +3210,22 @@ public class CraftPlayer extends CraftHumanEntity implements Player, PluginMessa
     }
 
     @Override
-    public void hideSelfIf(final Predicate<Player> hideSelfIf, final Collection<? extends Player> disallowedViewer) {
-        this.hideSelfIf = hideSelfIf;
-        this.disallowedViewer = disallowedViewer;
-    }
-
-    @Override
     public void recalculateTechHider() {
+        int viewDist = this.getWorld().getViewDistance();
 
-    }
+        int cx = this.getLocation().getBlockX() >> 4;
+        int cz = this.getLocation().getBlockZ() >> 4;
 
-    @Override
-    public void recalculateSelfHider() {
-
+        for (int x = cx - viewDist; x <= cx + viewDist; x++) {
+            for (int z = cz - viewDist; z <= cz + viewDist; z++) {
+                if (this.getWorld().isChunkLoaded(x, z)) {
+                    this.getWorld().refreshChunk(x, z);
+                    LevelChunk chunk = this.getHandle().level().getChunkSource().getChunkNow(x, z);
+                    if (chunk != null)
+                        PlayerChunkSender.sendChunk(this.getHandle().connection, this.getHandle().level(), chunk);
+                }
+            }
+        }
     }
 
     @Override

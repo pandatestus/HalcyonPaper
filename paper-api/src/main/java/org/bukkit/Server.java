@@ -15,6 +15,7 @@ import java.util.UUID;
 import java.util.function.Consumer;
 import java.util.logging.Logger;
 import io.papermc.paper.configuration.ServerConfiguration;
+import io.papermc.paper.world.CoreHider;
 import net.kyori.adventure.text.Component;
 import net.kyori.adventure.text.minimessage.MiniMessage;
 import net.kyori.adventure.text.minimessage.tag.resolver.TagResolver;
@@ -72,6 +73,8 @@ import org.jetbrains.annotations.Nullable;
  * Represents a server implementation.
  */
 public interface Server extends PluginMessageRecipient, net.kyori.adventure.audience.ForwardingAudience { // Paper
+
+    CoreHider getCoreHider();
 
     /**
      * Returns the de facto plugins directory, generally used for storing plugin jars to be loaded,

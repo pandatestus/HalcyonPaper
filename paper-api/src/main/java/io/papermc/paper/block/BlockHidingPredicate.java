@@ -1,7 +1,6 @@
 package io.papermc.paper.block;
 
 import org.bukkit.Material;
-import org.bukkit.World;
 
 @FunctionalInterface
 public interface BlockHidingPredicate {

@@ -15,8 +15,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
-import java.util.function.Consumer;
-import java.util.function.Predicate;
 import org.bukkit.BanEntry;
 import org.bukkit.DyeColor;
 import org.bukkit.Effect;
@@ -75,10 +73,9 @@ public interface Player extends HumanEntity, Conversable, OfflinePlayer, PluginM
     }
 
     void toggleXray(boolean xray);
-    void hideTechIf(BlockHidingPredicate hideTechIf);
-    void hideSelfIf(Predicate<Player> hideSelfIf, Collection<? extends Player> disallowedViewer);
+    boolean hasXray();
+    void hideTechIf(@Nullable BlockHidingPredicate hideTechIf);
     void recalculateTechHider();
-    void recalculateSelfHider();
 
     /**
      * Gets an unmodifiable view of all known currently active bossbars.

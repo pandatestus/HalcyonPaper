@@ -15,6 +15,7 @@ import java.util.UUID;
 import java.util.function.Consumer;
 import java.util.logging.Logger;
 import io.papermc.paper.configuration.ServerConfiguration;
+import io.papermc.paper.world.CoreHider;
 import net.kyori.adventure.text.Component;
 import org.bukkit.Warning.WarningState;
 import org.bukkit.advancement.Advancement;
@@ -75,6 +76,10 @@ public final class Bukkit {
      * Static class cannot be initialized.
      */
     private Bukkit() {}
+
+    public static CoreHider getCoreHider() {
+        return server.getCoreHider();
+    }
 
     /**
      * Gets the current {@link Server} singleton
