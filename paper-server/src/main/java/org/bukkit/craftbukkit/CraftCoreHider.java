@@ -2,6 +2,7 @@ package org.bukkit.craftbukkit;
 
 
 import io.papermc.paper.world.CoreHider;
+import it.unimi.dsi.fastutil.ints.Int2IntOpenHashMap;
 import it.unimi.dsi.fastutil.ints.IntArrayList;
 import it.unimi.dsi.fastutil.ints.IntList;
 import it.unimi.dsi.fastutil.ints.IntOpenHashSet;
@@ -24,8 +25,6 @@ import java.util.UUID;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
-import java.util.concurrent.Executors;
-import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Predicate;
 import net.minecraft.core.BlockPos;
@@ -37,12 +36,8 @@ import net.minecraft.server.MinecraftServer;
 import net.minecraft.server.level.HlcyRegion;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.server.level.ServerPlayer;
-import net.minecraft.server.network.PlayerChunkSender;
 import net.minecraft.world.entity.Entity;
-import net.minecraft.world.entity.item.PrimedTnt;
-import net.minecraft.world.level.ChunkPos;
 import net.minecraft.world.level.block.state.BlockState;
-import net.minecraft.world.level.chunk.LevelChunk;
 import net.minecraft.world.phys.AABB;
 import org.bukkit.Bukkit;
 import org.bukkit.Location;
@@ -59,17 +54,20 @@ public class CraftCoreHider implements CoreHider {
     private final ObjectOpenHashSet<BlockPos> unhiddenRed = new ObjectOpenHashSet<>();
     private final ObjectOpenHashSet<BlockPos> unhiddenBlue = new ObjectOpenHashSet<>();
 
-    private Long2IntOpenHashMap blueChamberByPos = new Long2IntOpenHashMap();
-    private Long2IntOpenHashMap redChamberByPos = new Long2IntOpenHashMap();
+    private final Long2IntOpenHashMap blueChamberByPos = new Long2IntOpenHashMap();
+    private final Long2IntOpenHashMap redChamberByPos = new Long2IntOpenHashMap();
 
-    private List<LongArrayList> blueChambers = new ArrayList<>();
-    private List<LongArrayList> redChambers = new ArrayList<>();
+    private final List<LongArrayList> blueChambers = new ArrayList<>();
+    private final List<LongArrayList> redChambers = new ArrayList<>();
 
     private final Set<Integer> unhiddenBlueChambers = new HashSet<>();
     private final Set<Integer> unhiddenRedChambers = new HashSet<>();
 
     private final Set<UUID> teamBlue = new HashSet<>();
     private final Set<UUID> teamRed = new HashSet<>();
+
+    private BlockPos blueSignPos;
+    private BlockPos redSignPos;
 
     @Override
     public void refresh() {
@@ -115,12 +113,26 @@ public class CraftCoreHider implements CoreHider {
         player.recalculateTechHider();
     }
 
+    @Override
+    public void clearUnhidden() {
+        unhiddenRed.clear();
+        unhiddenBlue.clear();
+        unhiddenBlueChambers.clear();
+        unhiddenRedChambers.clear();
+        blueChambers.clear();
+        blueChamberByPos.clear();
+        redChambers.clear();
+        redChamberByPos.clear();
+        blueSignPos = redSignPos = null;
+    }
+
     public boolean shouldHideCore(BlockPos pos, UUID uuid) {
         if (red == null || blue == null) return false;
 
         return (red.isInside(pos)
             && !teamRed.contains(uuid)
             && !unhiddenRed.contains(pos))
+
             || (blue.isInside(pos)
             && !teamBlue.contains(uuid)
             && !unhiddenBlue.contains(pos));
@@ -152,9 +164,6 @@ public class CraftCoreHider implements CoreHider {
         return BlockHider.getBlocks().contains(type);
     };
 
-    private static final ScheduledExecutorService EXECUTOR =
-        Executors.newSingleThreadScheduledExecutor();
-
     public void applyRayTrace() {
         World world = Bukkit.getWorld("world");
         if (world == null) return;
@@ -166,81 +175,135 @@ public class CraftCoreHider implements CoreHider {
         calculateBlue(world);
         calculateRed(world);
 
-        EXECUTOR.schedule(() -> MinecraftServer.getServer().execute(() -> {
+        MinecraftServer.getServer().execute(() -> {
             for (ServerPlayer serverPlayer : MinecraftServer.getServer().getPlayerList().players) {
                 serverPlayer.getBukkitEntity().recalculateTechHider();
+
+                if (!teamBlue.contains(serverPlayer.getUUID()) && blueSignPos != null) {
+                    SignHider.sendStolenSign(serverPlayer, blueSignPos);
+                }
+                if (!teamRed.contains(serverPlayer.getUUID()) && redSignPos != null) {
+                    SignHider.sendStolenSign(serverPlayer, redSignPos);
+                }
             }
-        }), 5, TimeUnit.SECONDS);
+        });
 
         long nowNS = System.nanoTime();
         long time = nowNS - ns;
         MinecraftServer.LOGGER.info("done calculating CoreHider, took " + String.format("%.3fms", time / 1_000_000.0));
     }
 
+    public void applyBlockTrace(BlockPos pos) {
+        World world = Bukkit.getWorld("world");
+        if (world == null) return;
+
+        if (red == null || blue == null) return;
+
+        boolean isInsideRed = red.isInside(pos);
+        boolean isInsideBlue = blue.isInside(pos);
+        if (isInsideBlue) {
+            rayTraceSingleBlock(world, blue, unhiddenBlue, pos);
+        }
+
+        if (isInsideRed) {
+            rayTraceSingleBlock(world, red, unhiddenRed, pos);
+        }
+    }
+
+    private void rayTraceSingleBlock(World world, HlcyRegion region, ObjectOpenHashSet<BlockPos> unhidden, BlockPos pos) {
+        Map<SectionPos, List<BlockPos>> changedBySection = new HashMap<>();
+
+        //Front
+        for (int z = region.minZ(); z <= region.maxZ(); z++) {
+            Block block = world.getBlockAt(pos.getX(), pos.getY(), z);
+            BlockPos unhiddenPos = new BlockPos(pos.getX(), pos.getY(), z);
+            if (unhidden.add(pos)) {
+                changedBySection.computeIfAbsent(SectionPos.of(unhiddenPos), k -> new ArrayList<>()).add(unhiddenPos);
+            }
+            if (isBlocked.test(block)) break;
+        }
+
+        //Back
+        for (int z = region.maxZ(); z >= region.minZ(); z--) {
+            Block block = world.getBlockAt(pos.getX(), pos.getY(), z);
+            BlockPos unhiddenPos = new BlockPos(pos.getX(), pos.getY(), z);
+            if (unhidden.add(pos)) {
+                changedBySection.computeIfAbsent(SectionPos.of(unhiddenPos), k -> new ArrayList<>()).add(unhiddenPos);
+            }
+            if (isBlocked.test(block)) break;
+        }
+
+        //Top
+        for (int y = region.maxY(); y >= region.minY(); y--) {
+            Block block = world.getBlockAt(pos.getX(), y, pos.getZ());
+            BlockPos unhiddenPos = new BlockPos(pos.getX(), y, pos.getZ());
+            if (unhidden.add(pos)) {
+                changedBySection.computeIfAbsent(SectionPos.of(unhiddenPos), k -> new ArrayList<>()).add(unhiddenPos);
+            }
+            if (isBlocked.test(block)) break;
+        }
+
+        //Right
+        for (int x = region.minX(); x <= region.maxX(); x++) {
+            Block block = world.getBlockAt(x, pos.getY(), pos.getZ());
+            BlockPos unhiddenPos = new BlockPos(x, pos.getY(), pos.getZ());
+            if (unhidden.add(pos)) {
+                changedBySection.computeIfAbsent(SectionPos.of(unhiddenPos), k -> new ArrayList<>()).add(unhiddenPos);
+            }
+            if (isBlocked.test(block)) break;
+        }
+
+        //Left
+        for (int x = region.maxX(); x >= region.minX(); x--) {
+            Block block = world.getBlockAt(x, pos.getY(), pos.getZ());
+            BlockPos unhiddenPos = new BlockPos(x, pos.getY(), pos.getZ());
+            if (unhidden.add(pos)) {
+                changedBySection.computeIfAbsent(SectionPos.of(unhiddenPos), k -> new ArrayList<>()).add(unhiddenPos);
+            }
+            if (isBlocked.test(block)) break;
+        }
+
+        if (!changedBySection.isEmpty()) {
+            ServerLevel level = ((CraftWorld) world).getHandle();
+            CompletableFuture.delayedExecutor(100, TimeUnit.MILLISECONDS).execute(() -> {
+                MinecraftServer.getServer().execute(() -> {
+                    sendBlockUpdates(level, changedBySection);
+                });
+            });
+        }
+    }
+
     private final ConcurrentMap<Integer, Entity> entityLookup = new ConcurrentHashMap<>();
 
     public void tick() {
-        long ns = System.nanoTime();
-        boolean shouldLog = Bukkit.getCurrentTick() % 100 == 0;
-
         ServerLevel level = MinecraftServer.getServer().overworld();
         if (red == null || blue == null) return;
 
-        if (shouldLog) {
-            MinecraftServer.LOGGER.info("ticking CoreHider");
-        }
-
-
         IntOpenHashSet currentlyHidden = new IntOpenHashSet();
 
-        List<PrimedTnt> blueTNT = getTntInRegion(level, blue);
-        List<PrimedTnt> redTNT = getTntInRegion(level, red);
-
-        List<ServerPlayer> bluePlayers = getPlayerInRegion(level, blue);
-        List<ServerPlayer> redPlayers = getPlayerInRegion(level, red);
+        List<Entity> blueEntities = getEntitiesInRegion(level, blue);
+        List<Entity> redEntities = getEntitiesInRegion(level, red);
 
         IntArrayList newlyHiddenBlue = new IntArrayList();
         IntArrayList newlyHiddenRed = new IntArrayList();
 
-        for (PrimedTnt tnt : blueTNT) {
-            if (unhiddenBlue.contains(tnt.blockPosition())) continue;
+        for (Entity entity : blueEntities) {
+            if (unhiddenBlue.contains(entity.blockPosition())) continue;
 
-            entityLookup.put(tnt.getId(), tnt);
+            entityLookup.put(entity.getId(), entity);
 
-            if (currentlyHidden.add(tnt.getId())) {
-                newlyHiddenBlue.add(tnt.getId());
+            if (currentlyHidden.add(entity.getId())) {
+                newlyHiddenBlue.add(entity.getId());
             }
         }
 
-        for (PrimedTnt tnt : redTNT) {
-            if (unhiddenRed.contains(tnt.blockPosition())) continue;
+        for (Entity entity : redEntities) {
+            if (unhiddenRed.contains(entity.blockPosition())) continue;
 
-            entityLookup.put(tnt.getId(), tnt);
+            entityLookup.put(entity.getId(), entity);
 
-            if (currentlyHidden.add(tnt.getId())) {
-                newlyHiddenRed.add(tnt.getId());
-            }
-        }
-
-        for (ServerPlayer player : bluePlayers) {
-            if (unhiddenBlue.contains(new BlockPos(player.getBlockX(), player.getBlockY(), player.getBlockZ())))
-                continue;
-
-            entityLookup.put(player.getId(), player);
-
-            if (currentlyHidden.add(player.getId())) {
-                newlyHiddenBlue.add(player.getId());
-            }
-        }
-
-        for (ServerPlayer player : redPlayers) {
-            if (unhiddenRed.contains(new BlockPos(player.getBlockX(), player.getBlockY(), player.getBlockZ())))
-                continue;
-
-            entityLookup.put(player.getId(), player);
-
-            if (currentlyHidden.add(player.getId())) {
-                newlyHiddenRed.add(player.getId());
+            if (currentlyHidden.add(entity.getId())) {
+                newlyHiddenRed.add(entity.getId());
             }
         }
 
@@ -273,30 +336,24 @@ public class CraftCoreHider implements CoreHider {
         if (!toShow.isEmpty()) {
             showEntitiesForPlayers(toShow);
         }
-
-        if (shouldLog) {
-            long nowNS = System.nanoTime();
-            long time = nowNS - ns;
-            MinecraftServer.LOGGER.info("done ticking CoreHider, took " + String.format("%.3fms", time / 1_000_000.0));
-        }
     }
 
     private static void sendBatchHide(
         IntArrayList ids,
         Predicate<ServerPlayer> shouldHideFor
     ) {
-        for(ServerPlayer viewer : MinecraftServer.getServer().getPlayerList().getPlayers()) {
-            if(!shouldHideFor.test(viewer)) continue;
+        for (ServerPlayer viewer : MinecraftServer.getServer().getPlayerList().getPlayers()) {
+            if (!shouldHideFor.test(viewer)) continue;
 
             IntList idList = new IntArrayList(ids.size());
             for (int i = 0; i < ids.size(); i++) {
                 int id = ids.getInt(i);
-                if(id == viewer.getId()) continue;
+                if (id == viewer.getId()) continue;
 
                 idList.add(id);
             }
 
-            if(idList.isEmpty()) continue;
+            if (idList.isEmpty()) continue;
 
             viewer.connection.send(new ClientboundRemoveEntitiesPacket(idList));
         }
@@ -327,20 +384,12 @@ public class CraftCoreHider implements CoreHider {
         }
     }
 
-    private static List<PrimedTnt> getTntInRegion(ServerLevel level, HlcyRegion region) {
+    private static List<Entity> getEntitiesInRegion(ServerLevel level, HlcyRegion region) {
         AABB box = new AABB(
             region.minX(), region.minY(), region.minZ(),
             region.maxX(), region.maxY(), region.maxZ()
         );
-        return level.getEntitiesOfClass(PrimedTnt.class, box);
-    }
-
-    private static List<ServerPlayer> getPlayerInRegion(ServerLevel level, HlcyRegion region) {
-        AABB box = new AABB(
-            region.minX(), region.minY(), region.minZ(),
-            region.maxX(), region.maxY(), region.maxZ()
-        );
-        return level.getEntitiesOfClass(ServerPlayer.class, box);
+        return level.getEntitiesOfClass(Entity.class, box);
     }
 
     private void calculateBlue(org.bukkit.World world) {
@@ -401,6 +450,7 @@ public class CraftCoreHider implements CoreHider {
                         Block block = world.getBlockAt(x, y, z);
                         unhiddenBlue.add(new BlockPos(x, y, z));
                         if (isBlocked.test(block)) {
+                            blueSignPos = new BlockPos(x, y - 1, z);
                             break;
                         }
                     }
@@ -409,6 +459,20 @@ public class CraftCoreHider implements CoreHider {
 
             //AIR
             calculateChambers(world, blue, blueChamberByPos, blueChambers);
+            addUnhiddenChambers(blueChambers, blueChamberByPos, unhiddenBlue, unhiddenBlueChambers);
+
+            outer:
+            for (int x = blue.minX(); x <= blue.maxX(); x++) {
+                for (int y = blue.minY(); y <= blue.maxY(); y++) {
+                    for (int z = blue.minZ(); z <= blue.maxZ(); z++) {
+                        BlockPos pos = new BlockPos(x, y, z);
+                        if (!unhiddenBlue.contains(pos)) {
+                            blueSignPos = pos;
+                            break outer;
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -478,6 +542,20 @@ public class CraftCoreHider implements CoreHider {
 
             //AIR
             calculateChambers(world, red, redChamberByPos, redChambers);
+            addUnhiddenChambers(redChambers, redChamberByPos, unhiddenRed, unhiddenRedChambers);
+
+            outer:
+            for (int x = red.minX(); x <= red.maxX(); x++) {
+                for (int y = red.minY(); y <= red.maxY(); y++) {
+                    for (int z = red.minZ(); z <= red.maxZ(); z++) {
+                        BlockPos pos = new BlockPos(x, y, z);
+                        if (!unhiddenRed.contains(pos)) {
+                            redSignPos = pos;
+                            break outer;
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -510,23 +588,6 @@ public class CraftCoreHider implements CoreHider {
         return count;
     }
 
-    private static void addIfEligible(
-        long pos,
-        int chamberId,
-        LongOpenHashSet eligible,
-        Long2IntOpenHashMap chamberByPos,
-        LongArrayFIFOQueue queue,
-        LongArrayList chamber
-    ) {
-        if (!eligible.contains(pos) || chamberByPos.containsKey(pos)) {
-            return;
-        }
-
-        chamberByPos.put(pos, chamberId);
-        queue.enqueue(pos);
-        chamber.add(pos);
-    }
-
     private static void calculateChambers(
         World world,
         HlcyRegion region,
@@ -537,40 +598,38 @@ public class CraftCoreHider implements CoreHider {
         chambers.clear();
         chamberByPos.defaultReturnValue(-1);
 
-        // Phase 1: Air-Positionen einmal erfassen.
         LongOpenHashSet air = new LongOpenHashSet();
+        LongOpenHashSet nonAir = new LongOpenHashSet();
 
         for (int x = region.minX(); x <= region.maxX(); x++) {
             for (int y = region.minY(); y <= region.maxY(); y++) {
                 for (int z = region.minZ(); z <= region.maxZ(); z++) {
                     if (world.getBlockAt(x, y, z).getType().isAir()) {
                         air.add(BlockPos.asLong(x, y, z));
+                    } else {
+                        nonAir.add(BlockPos.asLong(x, y, z));
                     }
                 }
             }
         }
 
-        // Phase 2: Air-Blöcke mit mindestens vier Air-Nachbarn.
         LongOpenHashSet eligible = new LongOpenHashSet();
 
-        for (LongIterator it = air.iterator(); it.hasNext();) {
+        for (LongIterator it = air.iterator(); it.hasNext(); ) {
             long pos = it.nextLong();
-
-            if (countAirNeighbours(pos, air) >= 4) {
+            if (countAirNeighbours(pos, air) >= 5) {
                 eligible.add(pos);
             }
         }
 
-        // Die Air-Menge wird danach nicht mehr benötigt.
         air = null;
 
-        // Phase 3: Zusammenhangskomponenten der geeigneten Blöcke finden.
-        for (LongIterator it = eligible.iterator(); it.hasNext();) {
+        LongOpenHashSet visitedNonAir = new LongOpenHashSet();
+
+        for (LongIterator it = eligible.iterator(); it.hasNext(); ) {
             long start = it.nextLong();
 
-            if (chamberByPos.containsKey(start)) {
-                continue;
-            }
+            if (chamberByPos.containsKey(start)) continue;
 
             int chamberId = chambers.size();
             LongArrayList chamber = new LongArrayList();
@@ -594,18 +653,49 @@ public class CraftCoreHider implements CoreHider {
                         z + DZ[i]
                     );
 
-                    addIfEligible(
-                        neighbour,
-                        chamberId,
-                        eligible,
-                        chamberByPos,
-                        queue,
-                        chamber
-                    );
+                    if (eligible.contains(neighbour) && !chamberByPos.containsKey(neighbour)) {
+                        chamberByPos.put(neighbour, chamberId);
+                        queue.enqueue(neighbour);
+                        chamber.add(neighbour);
+                    }
+                    else if (nonAir.contains(neighbour) && visitedNonAir.add(neighbour)) {
+                        chamber.add(neighbour);
+                        chamberByPos.put(neighbour, chamberId);
+                    }
                 }
             }
 
             chambers.add(chamber);
+        }
+    }
+
+    private static void addUnhiddenChambers(
+        List<LongArrayList> chambers,
+        Long2IntOpenHashMap chamberByPos,
+        ObjectOpenHashSet<BlockPos> unhidden,
+        Set<Integer> unhiddenChambers
+    ) {
+        Int2IntOpenHashMap unhiddenCountPerChamber = new Int2IntOpenHashMap();
+        unhiddenCountPerChamber.defaultReturnValue(0);
+
+        for (BlockPos pos : unhidden) {
+            int chamberId = chamberByPos.get(pos.asLong());
+            if (chamberId >= 0) {
+                unhiddenCountPerChamber.put(chamberId, unhiddenCountPerChamber.get(chamberId) + 1);
+            }
+        }
+
+        for (int chamberId : unhiddenCountPerChamber.keySet()) {
+            var chamber = chambers.get(chamberId);
+            int unhiddenCount = unhiddenCountPerChamber.get(chamberId);
+
+            if (chamber.size() >= 200 && unhiddenCount * 50 >= chamber.size()) {
+                if (unhiddenChambers.add(chamberId)) {
+                    for (int i = 0; i < chamber.size(); i++) {
+                        unhidden.add(BlockPos.of(chamber.getLong(i)));
+                    }
+                }
+            }
         }
     }
 
@@ -632,26 +722,26 @@ public class CraftCoreHider implements CoreHider {
             boolean addedRed = isInsideRed && unhiddenRed.add(pos);
 
             int chamberIdBlue = blueChamberByPos.get(pos.asLong());
-            if(chamberIdBlue >= 0 && unhiddenBlueChambers.add(chamberIdBlue)) {
+            if (chamberIdBlue >= 0 && unhiddenBlueChambers.add(chamberIdBlue)) {
                 LongArrayList chamber = blueChambers.get(chamberIdBlue);
 
-                for(int i = 0; i < chamber.size(); i++) {
+                for (int i = 0; i < chamber.size(); i++) {
                     BlockPos chamberPos = BlockPos.of(chamber.getLong(i));
 
-                    if(blue.isInside(chamberPos) && unhiddenBlue.add(chamberPos)) {
+                    if (blue.isInside(chamberPos) && unhiddenBlue.add(chamberPos)) {
                         changedBySection.computeIfAbsent(SectionPos.of(chamberPos), k -> new ArrayList<>()).add(chamberPos);
                     }
                 }
             }
 
             int chamberIdRed = redChamberByPos.get(pos.asLong());
-            if(chamberIdRed >= 0 && unhiddenRedChambers.add(chamberIdRed)) {
+            if (chamberIdRed >= 0 && unhiddenRedChambers.add(chamberIdRed)) {
                 LongArrayList chamber = redChambers.get(chamberIdRed);
 
-                for(int i = 0; i < chamber.size(); i++) {
+                for (int i = 0; i < chamber.size(); i++) {
                     BlockPos chamberPos = BlockPos.of(chamber.getLong(i));
 
-                    if(red.isInside(chamberPos) && unhiddenRed.add(chamberPos)) {
+                    if (red.isInside(chamberPos) && unhiddenRed.add(chamberPos)) {
                         changedBySection.computeIfAbsent(SectionPos.of(chamberPos), k -> new ArrayList<>()).add(chamberPos);
                     }
                 }
@@ -664,50 +754,63 @@ public class CraftCoreHider implements CoreHider {
             }
         }
 
-        if (!changedBySection.isEmpty()) queueForBatchSend(level, changedBySection);
+        if (!changedBySection.isEmpty()) {
+            CompletableFuture.delayedExecutor(100, TimeUnit.MILLISECONDS).execute(() -> {
+                MinecraftServer.getServer().execute(() -> {
+                    sendBlockUpdates(level, changedBySection);
+                });
+            });
+        }
     }
 
-    private static void queueForBatchSend(ServerLevel level, Map<SectionPos, List<BlockPos>> changedBySection) {
-        synchronized (pendingUpdates) {
-            changedBySection.forEach((section, positions) ->
-                pendingUpdates.computeIfAbsent(section, k -> new ArrayList<>()).addAll(positions)
-            );
+    private void sendBlockUpdates(ServerLevel level, Map<SectionPos, List<BlockPos>> changedBySection) {
+        for (Map.Entry<SectionPos, List<BlockPos>> entry : changedBySection.entrySet()) {
+            SectionPos sectionPos = entry.getKey();
+            List<BlockPos> positions = entry.getValue();
 
-            if (!flushScheduled) {
-                flushScheduled = true;
-                MinecraftServer.getServer().execute(() -> flushPendingUpdates(level));
+            int size = positions.size();
+            short[] posShorts = new short[size];
+            BlockState[] states = new BlockState[size];
+
+            for (int i = 0; i < size; i++) {
+                BlockPos pos = positions.get(i);
+                int relX = pos.getX() - sectionPos.minBlockX();
+                int relY = pos.getY() - sectionPos.minBlockY();
+                int relZ = pos.getZ() - sectionPos.minBlockZ();
+                posShorts[i] = (short) ((relX << 8) | (relZ << 4) | relY);
+                states[i] = level.getBlockState(pos);
+            }
+
+            net.minecraft.network.protocol.game.ClientboundSectionBlocksUpdatePacket packet =
+                new net.minecraft.network.protocol.game.ClientboundSectionBlocksUpdatePacket(
+                    sectionPos, posShorts, states
+                );
+
+            for (ServerPlayer serverPlayer : level.players()) {
+                serverPlayer.connection.send(packet);
             }
         }
     }
 
-    private static void flushPendingUpdates(ServerLevel level) {
-        Map<SectionPos, List<BlockPos>> toSend;
-        synchronized (pendingUpdates) {
-            toSend = new HashMap<>(pendingUpdates);
-            pendingUpdates.clear();
-            flushScheduled = false;
-        }
-
-        if (toSend.isEmpty()) return;
-
-        Set<ChunkPos> affectedChunks = new HashSet<>();
-        for (SectionPos sectionPos : toSend.keySet()) {
-            affectedChunks.add(new ChunkPos(sectionPos.x(), sectionPos.z()));
-        }
-
-        CompletableFuture.delayedExecutor(200, TimeUnit.MILLISECONDS).execute(() -> {
-            MinecraftServer.getServer().execute(() -> {
-                for (ServerPlayer serverPlayer : level.players()) {
-                    resendChunks(serverPlayer, level, affectedChunks);
-                }
-            });
-        });
+    public boolean shouldHideSign(ServerPlayer player, BlockPos pos) {
+        if (pos.equals(blueSignPos) && !teamBlue.contains(player.getUUID())) return false;
+        if (pos.equals(redSignPos) && !teamRed.contains(player.getUUID())) return false;
+        return true;
     }
 
-    private static void resendChunks(ServerPlayer player, ServerLevel level, Set<ChunkPos> chunks) {
-        for (ChunkPos chunkPos : chunks) {
-            LevelChunk chunk = level.getChunk(chunkPos.x, chunkPos.z);
-            PlayerChunkSender.sendChunk(player.connection, player.level(), chunk);
-        }
+    public BlockPos getBlueSignPos() {
+        return blueSignPos;
+    }
+
+    public BlockPos getRedSignPos() {
+        return redSignPos;
+    }
+
+    public boolean isTeamBlue(UUID uuid) {
+        return teamBlue.contains(uuid);
+    }
+
+    public boolean isTeamRed(UUID uuid) {
+        return teamRed.contains(uuid);
     }
 }

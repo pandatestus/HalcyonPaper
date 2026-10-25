@@ -21,8 +21,9 @@ public class BlockHider {
 
     public static final BlockState ENDSTONE = Blocks.END_STONE.defaultBlockState();
     public static final BlockState STRUCTURE_VOID = Blocks.STRUCTURE_VOID.defaultBlockState();
+    public static final BlockState OAK_WALL_SIGN = Blocks.OAK_WALL_SIGN.defaultBlockState();
 
-    private static final BlockState[] hiderPreset = new BlockState[]{ENDSTONE, STRUCTURE_VOID};
+    private static final BlockState[] hiderPreset = new BlockState[]{ENDSTONE, STRUCTURE_VOID, OAK_WALL_SIGN};
 
     public static BlockState[] getHiderPreset() {
         return hiderPreset;

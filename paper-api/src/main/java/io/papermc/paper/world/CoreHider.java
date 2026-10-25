@@ -13,4 +13,5 @@ public interface CoreHider {
     void addBluePlayer(Player player);
     void addRedPlayer(Player player);
     void addSpectator(Player player);
+    void clearUnhidden();
 }

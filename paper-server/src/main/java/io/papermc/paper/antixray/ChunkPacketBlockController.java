@@ -63,7 +63,7 @@ public class ChunkPacketBlockController {
 
     public void obfuscate(ChunkPacketInfo<BlockState> chunkPacketInfo, ServerPlayer player) {
         if (chunkPacketInfo == null || player == null) {
-            net.minecraft.server.MinecraftServer.LOGGER.info("chunk or player null");
+            MinecraftServer.LOGGER.info("chunk or player null");
             return;
         }
 
@@ -90,12 +90,11 @@ public class ChunkPacketBlockController {
             }
 
             PalettedContainer<BlockState> states = section.getStates();
-            Palette<BlockState> palette = states.data.palette();
 
-            int paletteSize = palette.getSize();
-
-            int[] remap = new int[paletteSize];
             int disguiseIndex = -1;
+
+            Palette<BlockState> palette = states.data.palette();
+            int paletteSize = palette.getSize();
 
             for (int disguiseI = 0; disguiseI < paletteSize; disguiseI++) {
                 if (palette.valueFor(disguiseI).getBukkitMaterial().name().equalsIgnoreCase(disguiseState.getBukkitMaterial().name())) {
@@ -113,7 +112,7 @@ public class ChunkPacketBlockController {
 
                     ClientboundSectionBlocksUpdatePacket updatePacket = new ClientboundSectionBlocksUpdatePacket(sectionPos, positions.toShortArray(), newStates);
 
-                    CompletableFuture.delayedExecutor(10, TimeUnit.MILLISECONDS).execute(() -> {
+                    CompletableFuture.delayedExecutor(50, TimeUnit.MILLISECONDS).execute(() -> {
                         MinecraftServer.getServer().execute(() -> player.connection.send(updatePacket));
                     });
                 }
@@ -143,7 +142,32 @@ public class ChunkPacketBlockController {
                 Material material = state.getBukkitMaterial();
                 if (state.hasProperty(BlockStateProperties.WATERLOGGED) && state.getValue(BlockStateProperties.WATERLOGGED))
                     material = Material.WATER;
-                if (BlockHider.shouldHide(player.getBukkitEntity(), material, worldPos) || coreHider.shouldHideCore(worldPos, player.getUUID())) {
+
+                BlockPos blueSign = coreHider.getBlueSignPos();
+                BlockPos redSign = coreHider.getRedSignPos();
+                boolean isSignPos = (blueSign != null && blueSign.equals(worldPos) && !coreHider.isTeamBlue(player.getUUID()))
+                    || (redSign != null && redSign.equals(worldPos) && !coreHider.isTeamRed(player.getUUID()));
+
+                if(isSignPos) {
+                    int signIndex = -1;
+                    for(int pi = 0; pi < paletteSize; pi++) {
+                        if(palette.valueFor(pi).getBlock() == Blocks.OAK_WALL_SIGN) {
+                            signIndex = pi;
+                            break;
+                        }
+                    }
+
+                    newIndex = signIndex != -1 ? signIndex : originalIndex;
+
+                    if(signIndex == -1) {
+                        final BlockPos signPos = worldPos;
+                        CompletableFuture.delayedExecutor(250, TimeUnit.MILLISECONDS).execute(() ->
+                            MinecraftServer.getServer().execute(() ->
+                                org.bukkit.craftbukkit.SignHider.sendStolenSign(player, signPos)
+                            )
+                        );
+                    }
+                } else if (BlockHider.shouldHide(player.getBukkitEntity(), material, worldPos) || coreHider.shouldHideCore(worldPos, player.getUUID())) {
                     newIndex = disguiseIndex;
                 } else {
                     newIndex = originalIndex;
@@ -167,11 +191,11 @@ public class ChunkPacketBlockController {
             for (int y = 0; y < 16; y++) {
                 for (int z = 0; z < 16; z++) {
                     BlockState state = section.getBlockState(x, y, z);
-                    BlockPos pos = new BlockPos(x, y, z);
+                    BlockPos pos = new BlockPos(baseX + x, baseY + y, baseZ + z);
                     Material material = state.getBukkitMaterial();
                     if (state.hasProperty(BlockStateProperties.WATERLOGGED) && state.getValue(BlockStateProperties.WATERLOGGED))
                         material = Material.WATER;
-                    if (BlockHider.shouldHide(player, material, pos) || coreHider.shouldHideCore(new BlockPos(baseX + x, baseY + y, baseZ + z), player.getUniqueId())) {
+                    if (BlockHider.shouldHide(player, material, pos) || coreHider.shouldHideCore(pos, player.getUniqueId())) {
                         states.add(disguise);
                         positions.add((short) ((x << 8) | (z << 4) | y));
                     }
