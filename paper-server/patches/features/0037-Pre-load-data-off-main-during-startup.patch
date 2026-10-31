@@ -1,0 +1,41 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Nassim Jahnke <nassim@njahnke.dev>
+Date: Fri, 17 Jul 2026 16:15:46 +0200
+Subject: [PATCH] Pre-load data off-main during startup
+
+Backport of the Main.java part of upstream Paper's
+"Pre-load data off-main during startup" patch to 1.21.8.
+
+The Blocks.java part (parallel BlockState#initCache) is intentionally NOT
+backported: it initialises collision shape caches that TNT/entity physics
+reads, and it has not been verified on 1.21.8 + Moonrise.
+
+diff --git a/net/minecraft/server/Main.java b/net/minecraft/server/Main.java
+index fd3553bdc1c3cdbf6aa3dc00e0a4987f8eaa4fb8..497cc2d5197c2dc840ea8dedb6f857bb1abe5405 100644
+--- a/net/minecraft/server/Main.java
++++ b/net/minecraft/server/Main.java
+@@ -104,7 +104,10 @@ public class Main {
+                 writePidFile(path);
+             }
+ 
+-            CrashReport.preload();
++            // Paper start - Perf: Run CrashReport preload asynchronously
++            // The actual result is discarded/irrelevant, but hardware and software info is memoized
++            Thread.ofPlatform().daemon().name("CrashReport preload thread").start(CrashReport::preload);
++            // Paper end - Perf: Run CrashReport preload asynchronously
+             if (optionSet.has("jfrProfile")) { // CraftBukkit
+                 JvmProfiler.INSTANCE.start(Environment.SERVER);
+             }
+@@ -112,6 +115,12 @@ public class Main {
+             io.papermc.paper.plugin.PluginInitializerManager.load(optionSet); // Paper
+             Bootstrap.bootStrap();
+             Bootstrap.validate();
++            // Paper start - Perf: Init DataConverter asynchronously
++            // Init for both of these are fairly expensive class-loading wise. Both are called again below/in MinecraftServer.spin,
++            // so failure during class init will become visible there.
++            Thread.ofPlatform().daemon().name("DataConverter MCTypeRegistry init thread").start(ca.spottedleaf.dataconverter.minecraft.datatypes.MCTypeRegistry::init);
++            Thread.ofPlatform().daemon().name("DataFixers init thread").start(net.minecraft.util.datafix.DataFixers::getDataFixer);
++            // Paper end - Perf: Init DataConverter asynchronously
+             Util.startTimerHackThread();
+             Path path1 = Paths.get("server.properties");
+             DedicatedServerSettings dedicatedServerSettings = new DedicatedServerSettings(optionSet); // CraftBukkit - CLI argument support

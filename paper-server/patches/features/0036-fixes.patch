@@ -1,0 +1,292 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: pandatestus <hendrikrinas14@gmail.com>
+Date: Sun, 25 Oct 2026 23:41:33 +0100
+Subject: [PATCH] fixes
+
+
+diff --git a/net/minecraft/network/protocol/game/ClientboundLevelChunkPacketData.java b/net/minecraft/network/protocol/game/ClientboundLevelChunkPacketData.java
+index 8c3bea820cf64b1a9e2ca038d14d18a4084a7227..844b941586df4b8f47f57b044e73e12dfb21eb00 100644
+--- a/net/minecraft/network/protocol/game/ClientboundLevelChunkPacketData.java
++++ b/net/minecraft/network/protocol/game/ClientboundLevelChunkPacketData.java
+@@ -44,9 +44,9 @@ public class ClientboundLevelChunkPacketData {
+     // Paper start - Anti-Xray - Add chunk packet info
+     @Deprecated @io.papermc.paper.annotation.DoNotUse
+     public ClientboundLevelChunkPacketData(LevelChunk levelChunk) {
+-        this(levelChunk, null);
++        this(null, levelChunk, null);
+     }
+-    public ClientboundLevelChunkPacketData(LevelChunk levelChunk, io.papermc.paper.antixray.ChunkPacketInfo<net.minecraft.world.level.block.state.BlockState> chunkPacketInfo) {
++    public ClientboundLevelChunkPacketData(net.minecraft.server.level.ServerPlayer player, LevelChunk levelChunk, io.papermc.paper.antixray.ChunkPacketInfo<net.minecraft.world.level.block.state.BlockState> chunkPacketInfo) {
+         // Paper endwwwww
+         this.heightmaps = levelChunk.getHeightmaps()
+             .stream()
+@@ -70,8 +70,64 @@ public class ClientboundLevelChunkPacketData {
+                     continue;
+                 }
+             }
+-            // Paper end - Handle oversized block entities in chunks
+-            this.blockEntitiesData.add(ClientboundLevelChunkPacketData.BlockEntityInfo.create(entry.getValue()));
++
++            BlockEntity blockEntity = entry.getValue();
++
++            if(player != null
++                && blockEntity instanceof net.minecraft.world.level.block.entity.SignBlockEntity sign
++                && net.minecraft.world.level.block.SignBlock.getWoodType(sign.getBlockState().getBlock()).equals(net.minecraft.world.level.block.state.properties.WoodType.OAK)
++                && org.bukkit.craftbukkit.BlockHider.shouldHide(player.getBukkitEntity(), org.bukkit.Material.TNT, sign.getBlockPos())) {
++
++                CompoundTag nbt = sign.saveWithFullMetadata(levelChunk.getLevel().registryAccess());
++
++                CompoundTag fakeNbt = org.bukkit.craftbukkit.SignHider.modifyNBT(player, nbt.copy());
++
++                BlockPos blockPos = blockEntity.getBlockPos();
++                int packedXZ = SectionPos.sectionRelative(blockPos.getX()) << 4 | SectionPos.sectionRelative(blockPos.getZ());
++                this.blockEntitiesData.add(new ClientboundLevelChunkPacketData.BlockEntityInfo(
++                    packedXZ,
++                    blockPos.getY(),
++                    blockEntity.getType(),
++                    fakeNbt.isEmpty() ? null : fakeNbt
++                ));
++
++            } else {
++                // Paper end - Handle oversized block entities in chunks
++                this.blockEntitiesData.add(ClientboundLevelChunkPacketData.BlockEntityInfo.create(blockEntity));
++            }
++        }
++
++        if (player != null) {
++            org.bukkit.craftbukkit.CraftCoreHider coreHider =
++                net.minecraft.server.MinecraftServer.getServer().server.getCoreHider();
++
++            BlockPos blueSign = coreHider.getBlueSignPos();
++            BlockPos redSign = coreHider.getRedSignPos();
++
++            for (BlockPos signPos : new BlockPos[]{blueSign, redSign}) {
++                if (signPos == null) continue;
++                if (!new net.minecraft.world.level.ChunkPos(signPos).equals(levelChunk.getPos())) continue;
++
++                boolean isBlue = signPos.equals(blueSign) && coreHider.isTeamBlue(player.getUUID());
++                boolean isRed = signPos.equals(redSign) && coreHider.isTeamRed(player.getUUID());
++                if (isBlue || isRed) continue;
++
++                CompoundTag nbt = new CompoundTag();
++                nbt.putInt("x", signPos.getX());
++                nbt.putInt("y", signPos.getY());
++                nbt.putInt("z", signPos.getZ());
++                org.bukkit.craftbukkit.SignHider.modifyNBT(player, nbt);
++
++                int packedXZ = SectionPos.sectionRelative(signPos.getX()) << 4
++                    | SectionPos.sectionRelative(signPos.getZ());
++
++                this.blockEntitiesData.add(new ClientboundLevelChunkPacketData.BlockEntityInfo(
++                    packedXZ,
++                    signPos.getY(),
++                    net.minecraft.world.level.block.entity.BlockEntityType.SIGN,
++                    nbt
++                ));
++            }
+         }
+     }
+ 
+diff --git a/net/minecraft/network/protocol/game/ClientboundLevelChunkWithLightPacket.java b/net/minecraft/network/protocol/game/ClientboundLevelChunkWithLightPacket.java
+index e2f15cf949d063878f6a7d299ba888a78cd0b737..538ae0956719f5114cf5ce73de28fcee758029a4 100644
+--- a/net/minecraft/network/protocol/game/ClientboundLevelChunkWithLightPacket.java
++++ b/net/minecraft/network/protocol/game/ClientboundLevelChunkWithLightPacket.java
+@@ -50,7 +50,8 @@ public class ClientboundLevelChunkWithLightPacket implements Packet<ClientGamePa
+         this.z = pos.z;
+         this.levelChunk = chunk;
+ 
+-        this.chunkData = new ClientboundLevelChunkPacketData(chunk, null); // Paper - Anti-Xray
++        this.chunkData = new ClientboundLevelChunkPacketData(null, chunk, null); // Paper - Anti-Xray
++
+         this.lightData = new ClientboundLightUpdatePacketData(pos, lightEngine, skyLight, blockLight);
+         this.needModifying = true;
+         this.setReady(true);
+@@ -64,7 +65,7 @@ public class ClientboundLevelChunkWithLightPacket implements Packet<ClientGamePa
+         this.levelChunk = chunk;
+ 
+         io.papermc.paper.antixray.ChunkPacketInfo<net.minecraft.world.level.block.state.BlockState> chunkPacketInfo = chunk.getLevel().chunkPacketBlockController.getChunkPacketInfo(this, chunk);// Paper - Ant-Xray
+-        this.chunkData = new ClientboundLevelChunkPacketData(chunk, chunkPacketInfo); // Paper - Anti-Xray
++        this.chunkData = new ClientboundLevelChunkPacketData(player, chunk, chunkPacketInfo); // Paper - Anti-Xray
+         this.lightData = new ClientboundLightUpdatePacketData(pos, lightEngine, skyLight, blockLight);
+         levelChunk.getLevel().chunkPacketBlockController.modifyBlocks(this, chunkPacketInfo, player);
+         this.needModifying = false;
+diff --git a/net/minecraft/server/level/ServerPlayerGameMode.java b/net/minecraft/server/level/ServerPlayerGameMode.java
+index cfbf34964288526e93d0a5b212c1b60296c10430..a2788aa3e2fad0865083fd133e68e14f8ec7dfa4 100644
+--- a/net/minecraft/server/level/ServerPlayerGameMode.java
++++ b/net/minecraft/server/level/ServerPlayerGameMode.java
+@@ -410,6 +410,9 @@ public class ServerPlayerGameMode {
+                 }
+                 // Paper end - Trigger bee_nest_destroyed trigger in the correct place
+ 
++                org.bukkit.craftbukkit.CraftCoreHider coreHider = (org.bukkit.craftbukkit.CraftCoreHider) org.bukkit.Bukkit.getCoreHider();
++                if(coreHider != null) coreHider.applyBlockTrace(pos);
++
+                 return true;
+                 // CraftBukkit end
+             }
+diff --git a/net/minecraft/server/network/ServerCommonPacketListenerImpl.java b/net/minecraft/server/network/ServerCommonPacketListenerImpl.java
+index 6a291ddc1da562da4dd592449f522b4a2907e8ea..65a129a4e41b3ea688d6a0163dc024bd26464a8a 100644
+--- a/net/minecraft/server/network/ServerCommonPacketListenerImpl.java
++++ b/net/minecraft/server/network/ServerCommonPacketListenerImpl.java
+@@ -297,6 +297,7 @@ public abstract class ServerCommonPacketListenerImpl implements net.minecraft.ne
+         org.bukkit.craftbukkit.entity.CraftPlayer player = serverPlayer.getBukkitEntity();
+         org.bukkit.craftbukkit.CraftCoreHider coreHider = server.server.getCoreHider();
+ 
++
+         switch (packet) {
+             case net.minecraft.network.protocol.game.ClientboundBlockUpdatePacket blockUpdatePacket -> {
+                 net.minecraft.world.level.block.state.BlockState original = blockUpdatePacket.blockState;
+@@ -305,8 +306,12 @@ public abstract class ServerCommonPacketListenerImpl implements net.minecraft.ne
+                 org.bukkit.Material material = original.getBukkitMaterial();
+                 if (original.hasProperty(net.minecraft.world.level.block.state.properties.BlockStateProperties.WATERLOGGED) && original.getValue(net.minecraft.world.level.block.state.properties.BlockStateProperties.WATERLOGGED))
+                     material = org.bukkit.Material.WATER;
+-                if (org.bukkit.craftbukkit.BlockHider.shouldHide(player, material, blockUpdatePacket.getPos()) || player.hasXray() || hullHide) {
+-                    packet = new net.minecraft.network.protocol.game.ClientboundBlockUpdatePacket(blockUpdatePacket.getPos(), org.bukkit.craftbukkit.BlockHider.getState(player));
++
++                if (org.bukkit.craftbukkit.BlockHider.shouldHide(player, material, blockUpdatePacket.getPos()) || hullHide) {
++                    if(coreHider.shouldHideSign(serverPlayer, blockUpdatePacket.getPos())) {
++                        net.minecraft.server.MinecraftServer.LOGGER.info("hidden block at " + blockUpdatePacket.getPos());
++                        packet = new net.minecraft.network.protocol.game.ClientboundBlockUpdatePacket(blockUpdatePacket.getPos(), org.bukkit.craftbukkit.BlockHider.getState(player));
++                    }
+                 }
+ 
+                 // if ((techhider.shouldHideChunk(blockUpdatePacket.getPos()) && techhider.isHidden(original)) || hullHide) {
+@@ -316,14 +321,14 @@ public abstract class ServerCommonPacketListenerImpl implements net.minecraft.ne
+             case net.minecraft.network.protocol.game.ClientboundSectionBlocksUpdatePacket sectionUpdate -> {
+                 net.minecraft.world.level.block.state.BlockState[] originalStates = sectionUpdate.getStates();
+ 
+-                boolean hullHide = coreHider.shouldHideCore(sectionUpdate.getSectionPos().center(), player.getUniqueId());
+-
+                 short[] positions = sectionUpdate.getPositions();
+                 net.minecraft.core.SectionPos sectionPos = sectionUpdate.getSectionPos();
+ 
+                 net.minecraft.world.level.block.state.BlockState disguise = org.bukkit.craftbukkit.BlockHider.getState(player);
+                 net.minecraft.world.level.block.state.BlockState[] newStates = new net.minecraft.world.level.block.state.BlockState[originalStates.length];
+ 
++                boolean needsModify = false;
++
+                 for (int i = 0; i < originalStates.length; i++) {
+                     net.minecraft.world.level.block.state.BlockState state = originalStates[i];
+                     short posShort = positions[i];
+@@ -336,49 +341,30 @@ public abstract class ServerCommonPacketListenerImpl implements net.minecraft.ne
+ 
+                     if (state.hasProperty(net.minecraft.world.level.block.state.properties.BlockStateProperties.WATERLOGGED) && state.getValue(net.minecraft.world.level.block.state.properties.BlockStateProperties.WATERLOGGED))
+                         material = org.bukkit.Material.WATER;
+-                    newStates[i] = org.bukkit.craftbukkit.BlockHider.shouldHide(player, material, blockPos) || hullHide
+-                        ? disguise
+-                        : state;
+ 
++                    boolean hide = org.bukkit.craftbukkit.BlockHider.shouldHide(player, material, blockPos) || coreHider.shouldHideCore(blockPos, player.getUniqueId());
++                    boolean sign = !coreHider.shouldHideSign(serverPlayer, blockPos);
++                    state = sign ? net.minecraft.world.level.block.Blocks.OAK_WALL_SIGN.defaultBlockState() : state;
++                    newStates[i] = hide && !sign ? disguise : state;
++
++                    if (hide) needsModify = true;
++                }
+ 
++                if (needsModify) {
+                     packet = new net.minecraft.network.protocol.game.ClientboundSectionBlocksUpdatePacket(
+                         sectionPos,
+                         positions,
+                         newStates
+                     );
+                 }
+-
+-                // if (techhider.shouldHideChunk(sectionUpdate.getSectionPos().center())) {
+-                //
+-                //     boolean needsModify = false;
+-                //     for (net.minecraft.world.level.block.state.BlockState state : originalStates) {
+-                //         if (techhider.isHidden(state) || hullHide) {
+-                //             needsModify = true;
+-                //             break;
+-                //         }
+-                //     }
+-                //
+-                //     if (needsModify) {
+-                //         net.minecraft.world.level.block.state.BlockState[] newStates = new net.minecraft.world.level.block.state.BlockState[originalStates.length];
+-                //         for (int i = 0; i < originalStates.length; i++) {
+-                //             newStates[i] = techhider.isHidden(originalStates[i]) || hullHide
+-                //                 ? techhider.getObfuscationState()
+-                //                 : originalStates[i];
+-                //         }
+-                //
+-                //         packet = new net.minecraft.network.protocol.game.ClientboundSectionBlocksUpdatePacket(
+-                //             sectionUpdate.getSectionPos(),
+-                //             sectionUpdate.getPositions(), // FastUtil-Wrapper
+-                //             newStates
+-                //         );
+-                //     }
+-                // }
+             }
+             case net.minecraft.network.protocol.game.ClientboundBlockEventPacket blockEventPacket -> {
+                 boolean hullHide = coreHider.shouldHideCore(blockEventPacket.getPos(), player.getUniqueId());
+ 
+                 if (org.bukkit.craftbukkit.BlockHider.shouldHide(player, blockEventPacket.getBlock().defaultBlockState().getBukkitMaterial(), blockEventPacket.getPos()) || player.hasXray() || hullHide) {
+-                    packet = new net.minecraft.network.protocol.game.ClientboundBlockUpdatePacket(blockEventPacket.getPos(), org.bukkit.craftbukkit.BlockHider.getState(player));
++                    if (coreHider.shouldHideSign(serverPlayer, blockEventPacket.getPos())) {
++                        packet = new net.minecraft.network.protocol.game.ClientboundBlockUpdatePacket(blockEventPacket.getPos(), org.bukkit.craftbukkit.BlockHider.getState(player));
++                    }
+                 }
+ 
+                 // if ((techhider.shouldHideChunk(blockEventPacket.getPos()) && techhider.isHidden(blockEventPacket.getBlock().defaultBlockState())) || hullHide) {
+@@ -395,21 +381,38 @@ public abstract class ServerCommonPacketListenerImpl implements net.minecraft.ne
+                 boolean hullHide = coreHider.shouldHideCore(new net.minecraft.core.BlockPos((int) soundPacket.getX(), (int) soundPacket.getY(), (int) soundPacket.getZ()), player.getUniqueId());
+ 
+                 if (hullHide) return;
++            }
+ 
+-                // int soundChunkX = net.minecraft.core.SectionPos.blockToSectionCoord(soundPacket.getX());
+-                // int soundChunkZ = net.minecraft.core.SectionPos.blockToSectionCoord(soundPacket.getZ());
+-                //
+-                // net.minecraft.world.level.chunk.LevelChunk soundChunk = serverPlayer.level().getChunkSource().getChunkNow(soundChunkX, soundChunkZ);
+-                //
+-                // if(soundChunk != null) {
+-                //     if(techhider.shouldHideChunk(soundChunk)) return;
+-                // }
++            case net.minecraft.network.protocol.game.ClientboundAddEntityPacket addEntityPacket -> {
++                boolean hullHide = coreHider.shouldHideCore(new net.minecraft.core.BlockPos((int) addEntityPacket.getX(), (int) addEntityPacket.getY(), (int) addEntityPacket.getZ()), player.getUniqueId());
++
++                if (hullHide && player.getUniqueId() != addEntityPacket.getUUID()) return;
++            }
++
++            case net.minecraft.network.protocol.game.ClientboundExplodePacket explodePacket -> {
++                boolean hullHide = coreHider.shouldHideCore(new net.minecraft.core.BlockPos((int) explodePacket.center().x, (int) explodePacket.center().y, (int) explodePacket.center().z), player.getUniqueId());
++
++                if (hullHide) return;
++            }
++
++            case net.minecraft.network.protocol.game.ClientboundLevelParticlesPacket particlesPacket -> {
++                boolean hullHide = coreHider.shouldHideCore(new net.minecraft.core.BlockPos((int) particlesPacket.getX(), (int) particlesPacket.getY(), (int) particlesPacket.getZ()), player.getUniqueId());
++
++                if (hullHide) return;
++            }
++
++            case net.minecraft.network.protocol.game.ClientboundBlockEntityDataPacket blockEntityDataPacket -> {
++                if (org.bukkit.craftbukkit.SignHider.isSign(serverPlayer.level(), blockEntityDataPacket.getPos())
++                    && org.bukkit.craftbukkit.BlockHider.shouldHide(player, org.bukkit.Material.TNT, blockEntityDataPacket.getPos())) {
++                    packet = org.bukkit.craftbukkit.SignHider.editText(serverPlayer, blockEntityDataPacket.getPos(), serverPlayer.level());
++                }
+             }
+             default -> {
+             }
+         }
+ 
+-        this.send(packet, null);
++        if (packet != null)
++            this.send(packet, null);
+     }
+ 
+     public void send(net.minecraft.network.protocol.Packet<?> packet, @javax.annotation.Nullable io.netty.channel.ChannelFutureListener channelFutureListener) {
+diff --git a/net/minecraft/world/level/chunk/storage/SerializableChunkData.java b/net/minecraft/world/level/chunk/storage/SerializableChunkData.java
+index 504c972256ad9d10c82797d4749c3a682e8bb291..be1ce455c2097c15fa3e67c6cd2cb4fd95b990bb 100644
+--- a/net/minecraft/world/level/chunk/storage/SerializableChunkData.java
++++ b/net/minecraft/world/level/chunk/storage/SerializableChunkData.java
+@@ -97,7 +97,7 @@ public record SerializableChunkData(
+     , @Nullable net.minecraft.nbt.Tag persistentDataContainer // CraftBukkit - persistentDataContainer
+ ) {
+     public static final Codec<PalettedContainer<BlockState>> BLOCK_STATE_CODEC = PalettedContainer.codecRW(
+-        Block.BLOCK_STATE_REGISTRY, BlockState.CODEC, PalettedContainer.Strategy.SECTION_STATES, Blocks.AIR.defaultBlockState(), null // Paper - Anti-Xray
++        Block.BLOCK_STATE_REGISTRY, BlockState.CODEC, PalettedContainer.Strategy.SECTION_STATES, Blocks.AIR.defaultBlockState(), BlockHider.getHiderPreset() // Paper - Anti-Xray
+     );
+     private static final Codec<List<SavedTick<Block>>> BLOCK_TICKS_CODEC = SavedTick.codec(BuiltInRegistries.BLOCK.byNameCodec()).listOf();
+     private static final Codec<List<SavedTick<Fluid>>> FLUID_TICKS_CODEC = SavedTick.codec(BuiltInRegistries.FLUID.byNameCodec()).listOf();

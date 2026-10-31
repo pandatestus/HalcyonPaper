@@ -1,0 +1,2047 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: pandatestus <hendrikrinas14@gmail.com>
+Date: Sun, 11 Oct 2026 23:51:36 +0200
+Subject: [PATCH] fixes
+
+
+diff --git a/net/minecraft/server/level/HullHider.java b/net/minecraft/server/level/HullHider.java
+deleted file mode 100644
+index 3eb00b5bd5b9c565ae615d2d99218eb8c3d4a22a..0000000000000000000000000000000000000000
+--- a/net/minecraft/server/level/HullHider.java
++++ /dev/null
+@@ -1,497 +0,0 @@
+-package net.minecraft.server.level;
+-
+-public class HullHider {
+-
+-    private final ServerPlayer player;
+-    private final PDCNodeReader reader;
+-
+-    private static @javax.annotation.Nullable HlcyRegion globalBlue;
+-    private static @javax.annotation.Nullable HlcyRegion globalRed;
+-
+-    private boolean hullRegionBlue;
+-    private boolean hullRegionRed;
+-
+-    private static final it.unimi.dsi.fastutil.objects.ObjectOpenHashSet<net.minecraft.core.BlockPos> unhiddenBlue = new it.unimi.dsi.fastutil.objects.ObjectOpenHashSet<>();
+-    private static final it.unimi.dsi.fastutil.objects.ObjectOpenHashSet<net.minecraft.core.BlockPos> unhiddenRed = new it.unimi.dsi.fastutil.objects.ObjectOpenHashSet<>();
+-
+-    public HullHider(final ServerPlayer player, PDCNodeReader reader) {
+-        this.player = player;
+-        this.reader = reader;
+-    }
+-
+-    public boolean shouldFillEndstone(net.minecraft.core.BlockPos pos) {
+-        boolean isInsideBlue = hullRegionBlue && globalBlue != null && globalBlue.isInside(pos);
+-        if (isInsideBlue) {
+-            boolean containsBlue = !unhiddenBlue.isEmpty() && unhiddenBlue.contains(pos);
+-            return !containsBlue;
+-        }
+-        boolean isInsideRed = hullRegionRed && globalRed != null && globalRed.isInside(pos);
+-        if (isInsideRed) {
+-            boolean containsRed = !unhiddenRed.isEmpty() && unhiddenRed.contains(pos);
+-            return !containsRed;
+-        }
+-        return false;
+-    }
+-
+-    private static final java.util.EnumSet<org.bukkit.Material> fallingBlocks = java.util.EnumSet.of(
+-        org.bukkit.Material.GRAVEL, org.bukkit.Material.SUSPICIOUS_GRAVEL, org.bukkit.Material.SAND, org.bukkit.Material.SUSPICIOUS_SAND, org.bukkit.Material.RED_SAND,
+-        org.bukkit.Material.BLACK_CONCRETE_POWDER, org.bukkit.Material.BLUE_CONCRETE_POWDER, org.bukkit.Material.BROWN_CONCRETE_POWDER, org.bukkit.Material.GRAY_CONCRETE_POWDER,
+-        org.bukkit.Material.LIGHT_GRAY_CONCRETE_POWDER, org.bukkit.Material.LIGHT_BLUE_CONCRETE_POWDER, org.bukkit.Material.RED_CONCRETE_POWDER, org.bukkit.Material.YELLOW_CONCRETE_POWDER,
+-        org.bukkit.Material.PURPLE_CONCRETE_POWDER, org.bukkit.Material.PINK_CONCRETE_POWDER, org.bukkit.Material.MAGENTA_CONCRETE_POWDER, org.bukkit.Material.CYAN_CONCRETE_POWDER,
+-        org.bukkit.Material.LIME_CONCRETE_POWDER, org.bukkit.Material.GREEN_CONCRETE_POWDER, org.bukkit.Material.WHITE_CONCRETE_POWDER, org.bukkit.Material.ORANGE_CONCRETE_POWDER
+-    );
+-
+-    private static final java.util.function.Predicate<org.bukkit.block.Block> isBlocked = block -> {
+-        org.bukkit.Material type = block.getType();
+-        if (type.isAir()) return false;
+-        if (block.isLiquid()) return false;
+-        if (fallingBlocks.contains(type)) return false;
+-        if (type.isOccluding()) return true;
+-        return Techhider.getHiderMaterials().contains(type);
+-    };
+-
+-    private static final java.util.function.Predicate<net.minecraft.world.level.block.state.BlockState> isBlockedNMS = block -> {
+-        org.bukkit.Material type = block.getBukkitMaterial();
+-        if (type.isAir()) return false;
+-        if (!block.getFluidState().isEmpty()) return false;
+-        if (fallingBlocks.contains(type)) return false;
+-        if (type.isOccluding()) return true;
+-        return Techhider.getHiderMaterials().contains(type);
+-    };
+-
+-    public static void applyRayTrace() {
+-        org.bukkit.World world = org.bukkit.Bukkit.getWorld("world");
+-        if (world == null) return;
+-
+-        boolean blueRegionNotSet = globalBlue == null;
+-        boolean redRegionNotSet = globalRed == null;
+-        if (blueRegionNotSet || redRegionNotSet) {
+-            PDCNodeReader worldReader = new PDCNodeReader(world.getPersistentDataContainer());
+-            if (blueRegionNotSet) globalBlue = worldReader.getRegion("hullhider", "blue");
+-            if (redRegionNotSet) globalRed = worldReader.getRegion("hullhider", "red");
+-
+-            net.minecraft.server.MinecraftServer.LOGGER.info((globalBlue == null) + " " + (globalRed == null) + " reader " + worldReader.getRegion("hullhider", "blue"));
+-        }
+-
+-        net.minecraft.server.MinecraftServer.LOGGER.info("calculating Hullhider");
+-        long ns = System.nanoTime();
+-
+-        calculateBlue(world);
+-        calculateRed(world);
+-
+-        for (ServerPlayer serverPlayer : net.minecraft.server.MinecraftServer.getServer().getPlayerList().players) {
+-            serverPlayer.getBukkitEntity().getTechhider().update();
+-        }
+-
+-        long nowNS = System.nanoTime();
+-        long time = nowNS - ns;
+-        net.minecraft.server.MinecraftServer.LOGGER.info("done calculating Hullhider, took " + String.format("%.3fms", time / 1_000_000.0));
+-    }
+-
+-    private static final java.util.concurrent.ConcurrentMap<Integer, net.minecraft.world.entity.item.PrimedTnt> entityLookup = new java.util.concurrent.ConcurrentHashMap<>();
+-
+-    public static void tick() {
+-        ServerLevel level = net.minecraft.server.MinecraftServer.getServer().overworld();
+-        if (globalBlue == null || globalRed == null) return;
+-
+-        it.unimi.dsi.fastutil.ints.IntOpenHashSet currentlyHidden = new it.unimi.dsi.fastutil.ints.IntOpenHashSet();
+-
+-        java.util.List<net.minecraft.world.entity.item.PrimedTnt> blueTNT = getTntInRegion(level, globalBlue);
+-        java.util.List<net.minecraft.world.entity.item.PrimedTnt> redTNT = getTntInRegion(level, globalRed);
+-
+-        // Statt sofort zu senden: IDs sammeln, die in diesem Tick NEU versteckt werden
+-        it.unimi.dsi.fastutil.ints.IntArrayList newlyHiddenBlue = new it.unimi.dsi.fastutil.ints.IntArrayList();
+-        it.unimi.dsi.fastutil.ints.IntArrayList newlyHiddenRed = new it.unimi.dsi.fastutil.ints.IntArrayList();
+-
+-        for (net.minecraft.world.entity.item.PrimedTnt tnt : blueTNT) {
+-            if (unhiddenBlue.contains(tnt.blockPosition())) continue;
+-
+-            entityLookup.put(tnt.getId(), tnt);
+-
+-            if (currentlyHidden.add(tnt.getId())) {
+-                newlyHiddenBlue.add(tnt.getId());
+-            }
+-        }
+-
+-        for (net.minecraft.world.entity.item.PrimedTnt tnt : redTNT) {
+-            if (unhiddenRed.contains(tnt.blockPosition())) continue;
+-
+-            entityLookup.put(tnt.getId(), tnt);
+-
+-            if (currentlyHidden.add(tnt.getId())) {
+-                newlyHiddenRed.add(tnt.getId());
+-            }
+-        }
+-
+-        // Jeweils EIN Batch-Packet pro Gruppe bauen und an die passenden Spieler schicken
+-        if (!newlyHiddenBlue.isEmpty()) {
+-            sendBatchHide(newlyHiddenBlue, serverPlayer ->
+-                serverPlayer.getBukkitEntity().getTechhider().getHullHider().hullRegionBlue);
+-        }
+-        if (!newlyHiddenRed.isEmpty()) {
+-            sendBatchHide(newlyHiddenRed, serverPlayer ->
+-                serverPlayer.getBukkitEntity().getTechhider().getHullHider().hullRegionRed);
+-        }
+-
+-        // Wieder sichtbare TNT sammeln
+-        java.util.List<net.minecraft.world.entity.item.PrimedTnt> toShow = new java.util.ArrayList<>();
+-        java.util.Iterator<Integer> it = entityLookup.keySet().iterator();
+-        while (it.hasNext()) {
+-            int id = it.next();
+-            if (!currentlyHidden.contains(id)) {
+-                net.minecraft.world.entity.item.PrimedTnt tnt = entityLookup.remove(id);
+-                if (tnt != null && !tnt.isRemoved()) {
+-                    toShow.add(tnt);
+-                }
+-                it.remove();
+-            }
+-        }
+-
+-        if (!toShow.isEmpty()) {
+-            showEntitiesForPlayers(toShow);
+-        }
+-    }
+-
+-    private static void sendBatchHide(it.unimi.dsi.fastutil.ints.IntArrayList ids,
+-                                      java.util.function.Predicate<ServerPlayer> shouldHideFor) {
+-        it.unimi.dsi.fastutil.ints.IntList idList = new it.unimi.dsi.fastutil.ints.IntArrayList(ids.size());
+-        for (int i = 0; i < ids.size(); i++) {
+-            idList.add(ids.getInt(i));
+-        }
+-
+-        net.minecraft.network.protocol.game.ClientboundRemoveEntitiesPacket packet =
+-            new net.minecraft.network.protocol.game.ClientboundRemoveEntitiesPacket(idList);
+-
+-        for (ServerPlayer serverPlayer : net.minecraft.server.MinecraftServer.getServer().getPlayerList().getPlayers()) {
+-            if (shouldHideFor.test(serverPlayer)) {
+-                serverPlayer.connection.send(packet); // gleiches Packet-Objekt für alle passenden Spieler
+-            }
+-        }
+-    }
+-
+-    private static void showEntitiesForPlayers(java.util.List<net.minecraft.world.entity.item.PrimedTnt> tntList) {
+-        for (ServerPlayer serverPlayer : net.minecraft.server.MinecraftServer.getServer().getPlayerList().getPlayers()) {
+-            for (net.minecraft.world.entity.item.PrimedTnt tnt : tntList) {
+-                net.minecraft.network.protocol.game.ClientboundAddEntityPacket addPacket =
+-                    new net.minecraft.network.protocol.game.ClientboundAddEntityPacket(
+-                        tnt.getId(),
+-                        tnt.getUUID(),
+-                        tnt.getX(),
+-                        tnt.getY(),
+-                        tnt.getZ(),
+-                        tnt.getXRot(),
+-                        tnt.getYRot(),
+-                        tnt.getType(),
+-                        0,
+-                        tnt.getDeltaMovement(),
+-                        tnt.getYHeadRot()
+-                    );
+-                serverPlayer.connection.send(addPacket);
+-                serverPlayer.connection.send(new net.minecraft.network.protocol.game.ClientboundSetEntityDataPacket(
+-                    tnt.getId(), tnt.getEntityData().packAll()));
+-            }
+-        }
+-    }
+-
+-    private static java.util.List<net.minecraft.world.entity.item.PrimedTnt> getTntInRegion(ServerLevel level, HlcyRegion region) {
+-        net.minecraft.world.phys.AABB box = new net.minecraft.world.phys.AABB(
+-            region.minX(), region.minY(), region.minZ(),
+-            region.maxX(), region.maxY(), region.maxZ()
+-        );
+-        return level.getEntitiesOfClass(net.minecraft.world.entity.item.PrimedTnt.class, box);
+-    }
+-
+-    private static void calculateBlue(org.bukkit.World world) {
+-        unhiddenBlue.clear();
+-        if (globalBlue != null) {
+-            //Front
+-            for (int x = globalBlue.minX(); x <= globalBlue.maxX(); x++) {
+-                for (int y = globalBlue.minY(); y <= globalBlue.maxY(); y++) {
+-                    for (int z = globalBlue.maxZ(); z >= globalBlue.minZ(); z--) {
+-                        org.bukkit.block.Block block = world.getBlockAt(x, y, z);
+-                        unhiddenBlue.add(new net.minecraft.core.BlockPos(x, y, z));
+-                        if (isBlocked.test(block)) {
+-                            break;
+-                        }
+-                    }
+-                }
+-            }
+-            //LeftSide
+-            for (int y = globalBlue.minY(); y <= globalBlue.maxY(); y++) {
+-                for (int z = globalBlue.minZ(); z <= globalBlue.maxZ(); z++) {
+-                    for (int x = globalBlue.minX(); x <= globalBlue.maxX(); x++) {
+-                        org.bukkit.block.Block block = world.getBlockAt(x, y, z);
+-                        unhiddenBlue.add(new net.minecraft.core.BlockPos(x, y, z));
+-                        if (isBlocked.test(block)) {
+-                            break;
+-                        }
+-                    }
+-                }
+-            }
+-            //RightSide
+-            for (int y = globalBlue.minY(); y <= globalBlue.maxY(); y++) {
+-                for (int z = globalBlue.minZ(); z <= globalBlue.maxZ(); z++) {
+-                    for (int x = globalBlue.maxX(); x >= globalBlue.minX(); x--) {
+-                        org.bukkit.block.Block block = world.getBlockAt(x, y, z);
+-                        unhiddenBlue.add(new net.minecraft.core.BlockPos(x, y, z));
+-                        if (isBlocked.test(block)) {
+-                            break;
+-                        }
+-                    }
+-                }
+-            }
+-            //BackSite
+-            for (int x = globalBlue.minX(); x <= globalBlue.maxX(); x++) {
+-                for (int y = globalBlue.minY(); y <= globalBlue.maxY(); y++) {
+-                    for (int z = globalBlue.minZ(); z <= globalBlue.maxZ(); z++) {
+-                        org.bukkit.block.Block block = world.getBlockAt(x, y, z);
+-                        unhiddenBlue.add(new net.minecraft.core.BlockPos(x, y, z));
+-                        if (isBlocked.test(block)) {
+-                            break;
+-                        }
+-                    }
+-                }
+-            }
+-            //Top
+-            for (int x = globalBlue.minX(); x <= globalBlue.maxX(); x++) {
+-                for (int z = globalBlue.minZ(); z <= globalBlue.maxZ(); z++) {
+-                    for (int y = globalBlue.maxY(); y >= globalBlue.minY(); y--) {
+-                        org.bukkit.block.Block block = world.getBlockAt(x, y, z);
+-                        unhiddenBlue.add(new net.minecraft.core.BlockPos(x, y, z));
+-                        if (isBlocked.test(block)) {
+-                            break;
+-                        }
+-                    }
+-                }
+-            }
+-        }
+-    }
+-
+-    private static void calculateRed(org.bukkit.World world) {
+-        unhiddenRed.clear();
+-        if (globalRed != null) {
+-            //Front
+-            for (int x = globalRed.minX(); x <= globalRed.maxX(); x++) {
+-                for (int y = globalRed.minY(); y <= globalRed.maxY(); y++) {
+-                    for (int z = globalRed.minZ(); z <= globalRed.maxZ(); z++) {
+-                        org.bukkit.block.Block block = world.getBlockAt(x, y, z);
+-                        unhiddenRed.add(new net.minecraft.core.BlockPos(x, y, z));
+-                        if (isBlocked.test(block)) {
+-                            break;
+-                        }
+-                    }
+-                }
+-            }
+-            //LeftSide
+-            for (int y = globalRed.minY(); y <= globalRed.maxY(); y++) {
+-                for (int z = globalRed.minZ(); z <= globalRed.maxZ(); z++) {
+-                    for (int x = globalRed.minX(); x <= globalRed.maxX(); x++) {
+-                        org.bukkit.block.Block block = world.getBlockAt(x, y, z);
+-                        unhiddenRed.add(new net.minecraft.core.BlockPos(x, y, z));
+-                        if (isBlocked.test(block)) {
+-                            break;
+-                        }
+-                    }
+-                }
+-            }
+-            //RightSide
+-            for (int y = globalRed.minY(); y <= globalRed.maxY(); y++) {
+-                for (int z = globalRed.minZ(); z <= globalRed.maxZ(); z++) {
+-                    for (int x = globalRed.maxX(); x >= globalRed.minX(); x--) {
+-                        org.bukkit.block.Block block = world.getBlockAt(x, y, z);
+-                        unhiddenRed.add(new net.minecraft.core.BlockPos(x, y, z));
+-                        if (isBlocked.test(block)) {
+-                            break;
+-                        }
+-                    }
+-                }
+-            }
+-            //BackSite
+-            for (int x = globalRed.minX(); x <= globalRed.maxX(); x++) {
+-                for (int y = globalRed.minY(); y <= globalRed.maxY(); y++) {
+-                    for (int z = globalRed.maxZ(); z >= globalRed.minZ(); z--) {
+-                        org.bukkit.block.Block block = world.getBlockAt(x, y, z);
+-                        unhiddenRed.add(new net.minecraft.core.BlockPos(x, y, z));
+-                        if (isBlocked.test(block)) {
+-                            break;
+-                        }
+-                    }
+-                }
+-            }
+-            //Top
+-            for (int x = globalRed.minX(); x <= globalRed.maxX(); x++) {
+-                for (int z = globalRed.minZ(); z <= globalRed.maxZ(); z++) {
+-                    for (int y = globalRed.maxY(); y >= globalRed.minY(); y--) {
+-                        org.bukkit.block.Block block = world.getBlockAt(x, y, z);
+-                        unhiddenRed.add(new net.minecraft.core.BlockPos(x, y, z));
+-                        if (isBlocked.test(block)) {
+-                            break;
+-                        }
+-                    }
+-                }
+-            }
+-        }
+-    }
+-
+-    public void updateRegions() {
+-        this.hullRegionBlue = reader.getBoolean("hullhider", "blue");
+-        this.hullRegionRed = reader.getBoolean("hullhider", "red");
+-    }
+-
+-    private static final java.util.Map<net.minecraft.core.SectionPos, java.util.List<net.minecraft.core.BlockPos>> pendingUpdates = new java.util.HashMap<>();
+-    private static boolean flushScheduled = false;
+-    private static boolean floodScheduled = false;
+-    private static ServerLevel pendingLevel;
+-    private static final java.util.List<net.minecraft.core.BlockPos> pendingDestroyed = new java.util.ArrayList<>();
+-
+-    public static void notifyBlocksDestroyed(org.bukkit.World world, java.util.Collection<net.minecraft.core.BlockPos> destroyedPositions) {
+-        if (globalBlue == null && globalRed == null) return;
+-
+-        net.minecraft.server.level.ServerLevel level = ((org.bukkit.craftbukkit.CraftWorld) world).getHandle();
+-
+-        synchronized (pendingDestroyed) {
+-            pendingDestroyed.addAll(destroyedPositions);
+-            pendingLevel = level;
+-
+-            if (!floodScheduled) {
+-                floodScheduled = true;
+-                net.minecraft.server.MinecraftServer.getServer().execute(HullHider::processPendingFlood);
+-            }
+-        }
+-    }
+-
+-    private static void processPendingFlood() {
+-        java.util.List<net.minecraft.core.BlockPos> toProcess;
+-        net.minecraft.server.level.ServerLevel level;
+-        synchronized (pendingDestroyed) {
+-            toProcess = new java.util.ArrayList<>(pendingDestroyed);
+-            level = pendingLevel;
+-            pendingDestroyed.clear();
+-            floodScheduled = false;
+-        }
+-        if (toProcess.isEmpty()) return;
+-
+-        boolean anyInRange = false;
+-        for (net.minecraft.core.BlockPos p : toProcess) {
+-            if ((globalBlue != null && globalBlue.isInside(p)) ||
+-                (globalRed != null && globalRed.isInside(p))) {
+-                anyInRange = true;
+-                break;
+-            }
+-        }
+-        if (!anyInRange) return;
+-
+-        final int MAX_RADIUS = 12;
+-
+-        java.util.Map<net.minecraft.core.SectionPos, java.util.List<net.minecraft.core.BlockPos>> changedBySection = new java.util.HashMap<>();
+-        java.util.Set<net.minecraft.core.BlockPos> visited = new java.util.HashSet<>();
+-        java.util.ArrayDeque<net.minecraft.core.BlockPos> queue = new java.util.ArrayDeque<>();
+-
+-        java.util.Map<net.minecraft.core.BlockPos, net.minecraft.core.BlockPos> originOf = new java.util.HashMap<>();
+-
+-        for (net.minecraft.core.BlockPos destroyed : toProcess) {
+-            boolean insideBlue = globalBlue != null && globalBlue.isInside(destroyed);
+-            boolean insideRed = globalRed != null && globalRed.isInside(destroyed);
+-            if (!insideBlue && !insideRed) continue;
+-            if (visited.add(destroyed)) {
+-                queue.add(destroyed);
+-                originOf.put(destroyed, destroyed);
+-            }
+-        }
+-
+-        while (!queue.isEmpty()) {
+-            net.minecraft.core.BlockPos pos = queue.poll();
+-            net.minecraft.core.BlockPos origin = originOf.get(pos);
+-
+-            boolean insideBlue = globalBlue != null && globalBlue.isInside(pos);
+-            boolean insideRed = globalRed != null && globalRed.isInside(pos);
+-            if (!insideBlue && !insideRed) continue;
+-
+-            if (isBlockedNMS.test(level.getBlockState(pos))) continue;
+-
+-            boolean addedBlue = insideBlue && unhiddenBlue.add(pos);
+-            boolean addedRed = insideRed && unhiddenRed.add(pos);
+-
+-            if (addedBlue || addedRed) {
+-                net.minecraft.core.SectionPos sectionPos = net.minecraft.core.SectionPos.of(pos);
+-                changedBySection.computeIfAbsent(sectionPos, k -> new java.util.ArrayList<>()).add(pos);
+-            } else {
+-                continue;
+-            }
+-
+-            for (net.minecraft.core.BlockPos neighbor : java.util.List.of(
+-                pos.west(), pos.east(), pos.north(), pos.south(), pos.above(), pos.below())) {
+-
+-                int dist = Math.abs(neighbor.getX() - origin.getX())
+-                    + Math.abs(neighbor.getY() - origin.getY())
+-                    + Math.abs(neighbor.getZ() - origin.getZ());
+-                if (dist > MAX_RADIUS) continue;
+-
+-                if (visited.add(neighbor)) {
+-                    queue.add(neighbor);
+-                    originOf.put(neighbor, origin);
+-                }
+-            }
+-        }
+-
+-        if (!changedBySection.isEmpty()) {
+-            queueForBatchSend(level, changedBySection);
+-        }
+-    }
+-
+-    private static void queueForBatchSend(net.minecraft.server.level.ServerLevel level, java.util.Map<net.minecraft.core.SectionPos, java.util.List<net.minecraft.core.BlockPos>> changedBySection) {
+-        synchronized (pendingUpdates) {
+-            changedBySection.forEach((section, positions) ->
+-                pendingUpdates.computeIfAbsent(section, k -> new java.util.ArrayList<>()).addAll(positions)
+-            );
+-
+-            if (!flushScheduled) {
+-                flushScheduled = true;
+-                net.minecraft.server.MinecraftServer.getServer().execute(() -> flushPendingUpdates(level));
+-            }
+-        }
+-    }
+-
+-    private static void flushPendingUpdates(net.minecraft.server.level.ServerLevel level) {
+-        java.util.Map<net.minecraft.core.SectionPos, java.util.List<net.minecraft.core.BlockPos>> toSend;
+-        synchronized (pendingUpdates) {
+-            toSend = new java.util.HashMap<>(pendingUpdates);
+-            pendingUpdates.clear();
+-            flushScheduled = false;
+-        }
+-
+-        if (toSend.isEmpty()) return;
+-
+-        // Betroffene Chunk-Koordinaten aus den Section-Keys ableiten, dedupliziert
+-        java.util.Set<net.minecraft.world.level.ChunkPos> affectedChunks = new java.util.HashSet<>();
+-        for (net.minecraft.core.SectionPos sectionPos : toSend.keySet()) {
+-            affectedChunks.add(new net.minecraft.world.level.ChunkPos(sectionPos.x(), sectionPos.z()));
+-        }
+-
+-        java.util.concurrent.CompletableFuture.delayedExecutor(200, java.util.concurrent.TimeUnit.MILLISECONDS).execute(() -> {
+-            net.minecraft.server.MinecraftServer.getServer().execute(() -> {
+-                for (net.minecraft.server.level.ServerPlayer serverPlayer : level.players()) {
+-                    resendChunks(serverPlayer, level, affectedChunks);
+-                }
+-                net.minecraft.server.MinecraftServer.LOGGER.info("resent " + affectedChunks.size() + " chunks!");
+-            });
+-        });
+-    }
+-
+-    private static void resendChunks(net.minecraft.server.level.ServerPlayer player, net.minecraft.server.level.ServerLevel level, java.util.Set<net.minecraft.world.level.ChunkPos> chunks) {
+-        for (net.minecraft.world.level.ChunkPos chunkPos : chunks) {
+-            if (!level.isLoaded(new net.minecraft.core.BlockPos(chunkPos.getMiddleBlockX(), 64, chunkPos.getMiddleBlockZ()))) {
+-                continue; // Chunk nicht geladen -> nichts zu senden
+-            }
+-
+-            net.minecraft.world.level.chunk.LevelChunk chunk = level.getChunk(chunkPos.x, chunkPos.z);
+-
+-            net.minecraft.network.protocol.game.ClientboundLevelChunkWithLightPacket packet =
+-                new net.minecraft.network.protocol.game.ClientboundLevelChunkWithLightPacket(
+-                    chunk, level.getLightEngine(), null, null
+-                );
+-
+-            player.connection.send(packet);
+-        }
+-    }
+-}
+diff --git a/net/minecraft/server/level/PDCNodeReader.java b/net/minecraft/server/level/PDCNodeReader.java
+deleted file mode 100644
+index 5e7bef86c1c973fe66bf5fb609ac43c72c8a7888..0000000000000000000000000000000000000000
+--- a/net/minecraft/server/level/PDCNodeReader.java
++++ /dev/null
+@@ -1,83 +0,0 @@
+-package net.minecraft.server.level;
+-
+-public class PDCNodeReader {
+-
+-    private final org.bukkit.persistence.PersistentDataContainer pdc;
+-
+-    public PDCNodeReader(final org.bukkit.persistence.PersistentDataContainer pdc) {
+-        this.pdc = pdc;
+-    }
+-
+-    public @org.jspecify.annotations.Nullable Integer getInt(String nameSpace, String key) {
+-        org.bukkit.NamespacedKey namespacedKey = new org.bukkit.NamespacedKey(nameSpace, key);
+-        return pdc.has(namespacedKey, org.bukkit.persistence.PersistentDataType.INTEGER) ? pdc.get(namespacedKey, org.bukkit.persistence.PersistentDataType.INTEGER) : null;
+-    }
+-
+-    public void writeInt(String nameSpace, String key, int integer) {
+-        org.bukkit.NamespacedKey namespacedKey = new org.bukkit.NamespacedKey(nameSpace, key);
+-        pdc.set(namespacedKey, org.bukkit.persistence.PersistentDataType.INTEGER, integer);
+-    }
+-
+-    public void remove(String nameSpace, String key) {
+-        org.bukkit.NamespacedKey namespacedKey = new org.bukkit.NamespacedKey(nameSpace, key);
+-        pdc.remove(namespacedKey);
+-    }
+-
+-    public boolean getBoolean(String nameSpace, String key, boolean defaultValue) {
+-        org.bukkit.NamespacedKey namespacedKey = new org.bukkit.NamespacedKey(nameSpace, key);
+-        return pdc.getOrDefault(namespacedKey, org.bukkit.persistence.PersistentDataType.BOOLEAN, defaultValue);
+-    }
+-
+-    public Boolean getBoolean(String nameSpace, String key) {
+-        org.bukkit.NamespacedKey namespacedKey = new org.bukkit.NamespacedKey(nameSpace, key);
+-        return pdc.getOrDefault(namespacedKey, org.bukkit.persistence.PersistentDataType.BOOLEAN, false);
+-    }
+-
+-    public void writeBoolean(String nameSpace, String key, boolean value) {
+-        org.bukkit.NamespacedKey namespacedKey = new org.bukkit.NamespacedKey(nameSpace, key);
+-        pdc.set(namespacedKey, org.bukkit.persistence.PersistentDataType.BOOLEAN, value);
+-    }
+-
+-    public @org.jspecify.annotations.Nullable HlcyRegion getRegion(String nameSpace, String key) {
+-        org.bukkit.NamespacedKey namespacedKeyMinX = new org.bukkit.NamespacedKey(nameSpace, key + "minx");
+-        org.bukkit.NamespacedKey namespacedKeyMinY = new org.bukkit.NamespacedKey(nameSpace, key + "miny");
+-        org.bukkit.NamespacedKey namespacedKeyMinZ = new org.bukkit.NamespacedKey(nameSpace, key + "minz");
+-
+-        org.bukkit.NamespacedKey namespacedKeyMaxX = new org.bukkit.NamespacedKey(nameSpace, key + "maxx");
+-        org.bukkit.NamespacedKey namespacedKeyMaxY = new org.bukkit.NamespacedKey(nameSpace, key + "maxy");
+-        org.bukkit.NamespacedKey namespacedKeyMaxZ = new org.bukkit.NamespacedKey(nameSpace, key + "maxz");
+-
+-        if(!pdc.has(namespacedKeyMinX, org.bukkit.persistence.PersistentDataType.INTEGER)
+-            || !pdc.has(namespacedKeyMinY, org.bukkit.persistence.PersistentDataType.INTEGER)
+-            || !pdc.has(namespacedKeyMinZ, org.bukkit.persistence.PersistentDataType.INTEGER)
+-            || !pdc.has(namespacedKeyMaxX, org.bukkit.persistence.PersistentDataType.INTEGER)
+-            || !pdc.has(namespacedKeyMaxY, org.bukkit.persistence.PersistentDataType.INTEGER)
+-            || !pdc.has(namespacedKeyMaxZ, org.bukkit.persistence.PersistentDataType.INTEGER)) return null;
+-
+-        return new HlcyRegion(
+-            pdc.get(namespacedKeyMinX, org.bukkit.persistence.PersistentDataType.INTEGER),
+-            pdc.get(namespacedKeyMinY, org.bukkit.persistence.PersistentDataType.INTEGER),
+-            pdc.get(namespacedKeyMinZ, org.bukkit.persistence.PersistentDataType.INTEGER),
+-            pdc.get(namespacedKeyMaxX, org.bukkit.persistence.PersistentDataType.INTEGER),
+-            pdc.get(namespacedKeyMaxY, org.bukkit.persistence.PersistentDataType.INTEGER),
+-            pdc.get(namespacedKeyMaxZ, org.bukkit.persistence.PersistentDataType.INTEGER)
+-        );
+-    }
+-
+-    public void writeRegion(String nameSpace, String key, int minX, int minY, int minZ, int maxX, int maxY, int maxZ) {
+-        org.bukkit.NamespacedKey namespacedKeyMinX = new org.bukkit.NamespacedKey(nameSpace, key + "minx");
+-        org.bukkit.NamespacedKey namespacedKeyMinY = new org.bukkit.NamespacedKey(nameSpace, key + "miny");
+-        org.bukkit.NamespacedKey namespacedKeyMinZ = new org.bukkit.NamespacedKey(nameSpace, key + "minz");
+-
+-        org.bukkit.NamespacedKey namespacedKeyMaxX = new org.bukkit.NamespacedKey(nameSpace, key + "maxx");
+-        org.bukkit.NamespacedKey namespacedKeyMaxY = new org.bukkit.NamespacedKey(nameSpace, key + "maxy");
+-        org.bukkit.NamespacedKey namespacedKeyMaxZ = new org.bukkit.NamespacedKey(nameSpace, key + "maxz");
+-
+-        pdc.set(namespacedKeyMinX, org.bukkit.persistence.PersistentDataType.INTEGER, minX);
+-        pdc.set(namespacedKeyMinY, org.bukkit.persistence.PersistentDataType.INTEGER, minY);
+-        pdc.set(namespacedKeyMinZ, org.bukkit.persistence.PersistentDataType.INTEGER, minZ);
+-        pdc.set(namespacedKeyMaxX, org.bukkit.persistence.PersistentDataType.INTEGER, maxX);
+-        pdc.set(namespacedKeyMaxY, org.bukkit.persistence.PersistentDataType.INTEGER, maxY);
+-        pdc.set(namespacedKeyMaxZ, org.bukkit.persistence.PersistentDataType.INTEGER, maxZ);
+-    }
+-}
+diff --git a/net/minecraft/server/level/ServerLevel.java b/net/minecraft/server/level/ServerLevel.java
+index bf82be1efcd5d1787ca1d46e0922f944055045e6..1bc825daf88b973be9cc6f34f6a1996b12433de1 100644
+--- a/net/minecraft/server/level/ServerLevel.java
++++ b/net/minecraft/server/level/ServerLevel.java
+@@ -52,7 +52,6 @@ import net.minecraft.network.protocol.game.ClientboundBlockEventPacket;
+ import net.minecraft.network.protocol.game.ClientboundDamageEventPacket;
+ import net.minecraft.network.protocol.game.ClientboundEntityEventPacket;
+ import net.minecraft.network.protocol.game.ClientboundExplodePacket;
+-import net.minecraft.network.protocol.game.ClientboundGameEventPacket;
+ import net.minecraft.network.protocol.game.ClientboundLevelEventPacket;
+ import net.minecraft.network.protocol.game.ClientboundLevelParticlesPacket;
+ import net.minecraft.network.protocol.game.ClientboundSetDefaultSpawnPositionPacket;
+@@ -74,7 +73,6 @@ import net.minecraft.util.CsvOutput;
+ import net.minecraft.util.Mth;
+ import net.minecraft.util.ProgressListener;
+ import net.minecraft.util.RandomSource;
+-import net.minecraft.util.datafix.DataFixTypes;
+ import net.minecraft.util.profiling.Profiler;
+ import net.minecraft.util.profiling.ProfilerFiller;
+ import net.minecraft.util.valueproviders.IntProvider;
+@@ -126,19 +124,14 @@ import net.minecraft.world.level.block.state.BlockState;
+ import net.minecraft.world.level.chunk.ChunkAccess;
+ import net.minecraft.world.level.chunk.ChunkGenerator;
+ import net.minecraft.world.level.chunk.LevelChunk;
+-import net.minecraft.world.level.chunk.LevelChunkSection;
+-import net.minecraft.world.level.chunk.storage.EntityStorage;
+ import net.minecraft.world.level.chunk.storage.RegionStorageInfo;
+-import net.minecraft.world.level.chunk.storage.SimpleRegionStorage;
+ import net.minecraft.world.level.dimension.BuiltinDimensionTypes;
+ import net.minecraft.world.level.dimension.LevelStem;
+ import net.minecraft.world.level.dimension.end.EndDragonFight;
+-import net.minecraft.world.level.entity.EntityPersistentStorage;
+ import net.minecraft.world.level.entity.EntityTickList;
+ import net.minecraft.world.level.entity.EntityTypeTest;
+ import net.minecraft.world.level.entity.LevelCallback;
+ import net.minecraft.world.level.entity.LevelEntityGetter;
+-import net.minecraft.world.level.entity.PersistentEntitySectionManager;
+ import net.minecraft.world.level.gameevent.DynamicGameEventListener;
+ import net.minecraft.world.level.gameevent.GameEvent;
+ import net.minecraft.world.level.gameevent.GameEventDispatcher;
+@@ -158,7 +151,6 @@ import net.minecraft.world.level.saveddata.maps.MapIndex;
+ import net.minecraft.world.level.saveddata.maps.MapItemSavedData;
+ import net.minecraft.world.level.storage.DimensionDataStorage;
+ import net.minecraft.world.level.storage.LevelStorageSource;
+-import net.minecraft.world.level.storage.ServerLevelData;
+ import net.minecraft.world.phys.AABB;
+ import net.minecraft.world.phys.Vec3;
+ import net.minecraft.world.phys.shapes.BooleanOp;
+@@ -823,7 +815,8 @@ public class ServerLevel extends Level implements ServerEntityGetter, WorldGenLe
+         }
+ 
+         tickCounter++;
+-        HullHider.tick();
++        org.bukkit.craftbukkit.CraftCoreHider coreHider = (org.bukkit.craftbukkit.CraftCoreHider) org.bukkit.Bukkit.getCoreHider();
++        coreHider.tick();
+ 
+         profilerFiller.push("entityManagement");
+         // Paper - rewrite chunk system
+diff --git a/net/minecraft/server/level/Techhider.java b/net/minecraft/server/level/Techhider.java
+deleted file mode 100644
+index a354e7a5a1689735a2b180cbd87aaffa01d2e2f4..0000000000000000000000000000000000000000
+--- a/net/minecraft/server/level/Techhider.java
++++ /dev/null
+@@ -1,227 +0,0 @@
+-package net.minecraft.server.level;
+-
+-public class Techhider {
+-
+-    // public static final org.bukkit.NamespacedKey HIDE_NONE = new org.bukkit.NamespacedKey("techhider", "none");
+-    private static final org.bukkit.NamespacedKey OBFUSCATION_TYPE = new org.bukkit.NamespacedKey("techhider", "type");
+-
+-    public static final net.minecraft.world.level.block.state.BlockState ENDSTONE = net.minecraft.world.level.block.Blocks.END_STONE.defaultBlockState();
+-    public static final net.minecraft.world.level.block.state.BlockState STRUCTURE_VOID = net.minecraft.world.level.block.Blocks.STRUCTURE_VOID.defaultBlockState();
+-
+-    // private static final org.bukkit.NamespacedKey KEY_MIN_X = new org.bukkit.NamespacedKey("techhider", "minx");
+-    // private static final org.bukkit.NamespacedKey KEY_MIN_Z = new org.bukkit.NamespacedKey("techhider", "minz");
+-    // private static final org.bukkit.NamespacedKey KEY_MAX_X = new org.bukkit.NamespacedKey("techhider", "maxx");
+-    // private static final org.bukkit.NamespacedKey KEY_MAX_Z = new org.bukkit.NamespacedKey("techhider", "maxz");
+-
+-    private boolean hideNone = false;
+-    private ObfuscationType type = net.minecraft.server.level.Techhider.ObfuscationType.ENDSTONE_TECHHIDER;
+-
+-    private static final net.minecraft.world.level.block.state.BlockState[] hiderPreset = new net.minecraft.world.level.block.state.BlockState[]{ENDSTONE, STRUCTURE_VOID};
+-    private static final java.util.List<org.bukkit.Material> hiderMaterials;
+-
+-    public static net.minecraft.world.level.block.state.BlockState[] getHiderPreset() {
+-        return hiderPreset;
+-    }
+-
+-    private static final java.util.Set<net.minecraft.world.level.block.Block> states = new java.util.HashSet<>();
+-
+-    static {
+-        states.add(net.minecraft.world.level.block.Blocks.OBSERVER);
+-        states.add(net.minecraft.world.level.block.Blocks.PISTON);
+-        states.add(net.minecraft.world.level.block.Blocks.PISTON_HEAD);
+-        states.add(net.minecraft.world.level.block.Blocks.MOVING_PISTON);
+-        states.add(net.minecraft.world.level.block.Blocks.STICKY_PISTON);
+-        states.add(net.minecraft.world.level.block.Blocks.REDSTONE_WIRE);
+-        states.add(net.minecraft.world.level.block.Blocks.REPEATER);
+-        states.add(net.minecraft.world.level.block.Blocks.COMPARATOR);
+-        states.add(net.minecraft.world.level.block.Blocks.SLIME_BLOCK);
+-        states.add(net.minecraft.world.level.block.Blocks.HONEY_BLOCK);
+-        states.add(net.minecraft.world.level.block.Blocks.NOTE_BLOCK);
+-        states.add(net.minecraft.world.level.block.Blocks.HOPPER);
+-        states.add(net.minecraft.world.level.block.Blocks.WATER);
+-        states.add(net.minecraft.world.level.block.Blocks.STONE_BUTTON);
+-        states.add(net.minecraft.world.level.block.Blocks.DETECTOR_RAIL);
+-        states.add(net.minecraft.world.level.block.Blocks.TNT);
+-        states.add(net.minecraft.world.level.block.Blocks.POWERED_RAIL);
+-        states.add(net.minecraft.world.level.block.Blocks.CHEST);
+-        states.add(net.minecraft.world.level.block.Blocks.TRAPPED_CHEST);
+-        states.add(net.minecraft.world.level.block.Blocks.STONE_PRESSURE_PLATE);
+-        states.add(net.minecraft.world.level.block.Blocks.IRON_DOOR);
+-        states.add(net.minecraft.world.level.block.Blocks.REDSTONE_BLOCK);
+-        states.add(net.minecraft.world.level.block.Blocks.REDSTONE_TORCH);
+-        states.add(net.minecraft.world.level.block.Blocks.REDSTONE_WALL_TORCH);
+-        states.add(net.minecraft.world.level.block.Blocks.BREWING_STAND);
+-        states.add(net.minecraft.world.level.block.Blocks.TRIPWIRE_HOOK);
+-        states.add(net.minecraft.world.level.block.Blocks.TRIPWIRE);
+-        states.add(net.minecraft.world.level.block.Blocks.ACTIVATOR_RAIL);
+-        states.add(net.minecraft.world.level.block.Blocks.DROPPER);
+-        states.add(net.minecraft.world.level.block.Blocks.LEVER);
+-
+-        hiderMaterials = states.stream().map(block -> block.defaultBlockState().getBukkitMaterial()).toList();
+-    }
+-
+-    public static java.util.List<org.bukkit.Material> getHiderMaterials() {
+-        return hiderMaterials;
+-    }
+-
+-    private @javax.annotation.Nullable PDCNodeReader reader;
+-    private final ServerPlayer serverPlayer;
+-    private @javax.annotation.Nullable HullHider hullHider;
+-
+-    private static final java.util.Map<java.util.UUID, Techhider> index = new java.util.concurrent.ConcurrentHashMap<>();
+-    // private Integer minx = null;
+-    // private Integer minz = null;
+-    // private Integer maxx = null;
+-    // private Integer maxz = null;
+-
+-    private @javax.annotation.Nullable HlcyRegion noHideArea;
+-
+-    public Techhider(ServerPlayer serverPlayer) {
+-        this.serverPlayer = serverPlayer;
+-        net.minecraft.server.MinecraftServer.LOGGER.info("created techhider for " + serverPlayer.displayName);
+-    }
+-
+-    public static Techhider getInstance(ServerPlayer serverPlayer) {
+-        return index.computeIfAbsent(serverPlayer.getUUID(), k -> new net.minecraft.server.level.Techhider(serverPlayer));
+-    }
+-
+-    public static void removeInstance(ServerPlayer serverPlayer) {
+-        index.remove(serverPlayer.getUUID());
+-    }
+-
+-    @javax.annotation.Nullable
+-    public PDCNodeReader getReader() {
+-        if (reader == null) {
+-            reader = new PDCNodeReader(
+-                (org.bukkit.craftbukkit.persistence.TechhiderPDC)
+-                    serverPlayer.getBukkitEntity().getPersistentDataContainer()
+-            );
+-            if (hullHider == null)
+-                hullHider = new HullHider(serverPlayer, reader);
+-        }
+-        return reader;
+-    }
+-
+-    public HullHider getHullHider() {
+-        getReader();
+-        return hullHider;
+-    }
+-
+-    public static void removeInstance(java.util.UUID playerId) {
+-        index.remove(playerId);
+-    }
+-
+-    private void setType(int index) {
+-        switch (index) {
+-            case 0 -> this.type = net.minecraft.server.level.Techhider.ObfuscationType.ENDSTONE_TECHHIDER;
+-            case 1 -> this.type = net.minecraft.server.level.Techhider.ObfuscationType.XRAY;
+-        }
+-    }
+-
+-    private static org.slf4j.Logger LOGGER = net.minecraft.server.MinecraftServer.LOGGER;
+-
+-    public void update() {
+-        LOGGER.info("[TH] 1 update");
+-
+-        try {
+-            LOGGER.info("[TH] 2 before displayName");
+-            LOGGER.info("[TH] player = " + serverPlayer);
+-
+-            LOGGER.info("[TH] 3 before getReader");
+-            getReader();
+-            LOGGER.info("[TH] 4 after getReader");
+-
+-            LOGGER.info("[TH] 5 before BukkitEntity");
+-            org.bukkit.craftbukkit.entity.CraftPlayer player = serverPlayer.getBukkitEntity();
+-            LOGGER.info("[TH] 6 after BukkitEntity");
+-
+-            org.bukkit.craftbukkit.persistence.TechhiderPDC pdc =
+-                (org.bukkit.craftbukkit.persistence.TechhiderPDC) player.getPersistentDataContainer();
+-
+-            LOGGER.info("[TH] 8 before getBoolean");
+-            this.hideNone = reader.getBoolean("techhider", "none", false);
+-            LOGGER.info("[TH] 9 after getBoolean");
+-
+-            LOGGER.info("[TH] 10 before type");
+-
+-            setType(
+-                pdc.getOrDefault(
+-                    OBFUSCATION_TYPE,
+-                    org.bukkit.persistence.PersistentDataType.INTEGER,
+-                    0
+-                )
+-            );
+-
+-            LOGGER.info("[TH] 11 after type");
+-
+-            this.noHideArea = reader.getRegion("techhider", "no-hide");
+-
+-            LOGGER.info("[TH] 12 after getRegion");
+-
+-            getHullHider().updateRegions();
+-
+-            LOGGER.info("[TH] 13 after updateRegions");
+-
+-            refreshRelevantChunks(player);
+-
+-            LOGGER.info("[TH] 14 finished");
+-
+-        } catch (Throwable e) {
+-            LOGGER.error("[TH] Error while updating", e);
+-        }
+-    }
+-
+-    private void refreshRelevantChunks(org.bukkit.craftbukkit.entity.CraftPlayer player) {
+-        net.minecraft.server.MinecraftServer.getServer().execute(() -> {
+-            int viewDist = player.getWorld().getViewDistance();
+-
+-            int cx = player.getLocation().getBlockX() >> 4;
+-            int cz = player.getLocation().getBlockZ() >> 4;
+-
+-            for (int x = cx - viewDist; x <= cx + viewDist; x++) {
+-                for (int z = cz - viewDist; z <= cz + viewDist; z++) {
+-                    if (player.getWorld().isChunkLoaded(x, z)) {
+-                        player.getWorld().refreshChunk(x, z);
+-                    }
+-                }
+-            }
+-        });
+-    }
+-
+-    public boolean shouldHideChunk(net.minecraft.world.level.chunk.LevelChunk chunk) {
+-        if (hideNone) return false;
+-
+-        return noHideArea == null || !noHideArea.isInsideChunk(chunk);
+-    }
+-
+-    public boolean shouldHideChunk(net.minecraft.core.BlockPos pos) {
+-        if (hideNone) return false;
+-
+-        return noHideArea == null || !noHideArea.isInsideChunk(pos);
+-    }
+-
+-    public net.minecraft.world.level.block.state.BlockState getObfuscationState() {
+-        if (type == net.minecraft.server.level.Techhider.ObfuscationType.XRAY) return STRUCTURE_VOID;
+-        return ENDSTONE;
+-    }
+-
+-    public boolean isHidden(net.minecraft.world.level.block.state.BlockState state) {
+-        if (type == net.minecraft.server.level.Techhider.ObfuscationType.XRAY)
+-            return state.getBlock().defaultBlockState() == ENDSTONE;
+-        if (state.hasProperty(net.minecraft.world.level.block.state.properties.BlockStateProperties.WATERLOGGED) && state.getValue(net.minecraft.world.level.block.state.properties.BlockStateProperties.WATERLOGGED))
+-            return true;
+-        return states.contains(state.getBlock());
+-    }
+-
+-    public static boolean isStateHidden(net.minecraft.world.level.block.state.BlockState state) {
+-        if (state.hasProperty(net.minecraft.world.level.block.state.properties.BlockStateProperties.WATERLOGGED) && state.getValue(net.minecraft.world.level.block.state.properties.BlockStateProperties.WATERLOGGED))
+-            return true;
+-        if (state.getBukkitMaterial().name().equalsIgnoreCase(org.bukkit.Material.MOVING_PISTON.name())) return true;
+-        return states.contains(state.getBlock());
+-    }
+-
+-    private enum ObfuscationType {
+-        ENDSTONE_TECHHIDER,
+-        XRAY
+-    }
+-}
+diff --git a/net/minecraft/server/network/ServerCommonPacketListenerImpl.java b/net/minecraft/server/network/ServerCommonPacketListenerImpl.java
+index 516658289272e93de00d20e8e79bc1250ed2b74e..6a291ddc1da562da4dd592449f522b4a2907e8ea 100644
+--- a/net/minecraft/server/network/ServerCommonPacketListenerImpl.java
++++ b/net/minecraft/server/network/ServerCommonPacketListenerImpl.java
+@@ -1,34 +1,5 @@
+ package net.minecraft.server.network;
+ 
+-import com.mojang.authlib.GameProfile;
+-import com.mojang.logging.LogUtils;
+-import io.netty.channel.ChannelFutureListener;
+-import javax.annotation.Nullable;
+-import net.minecraft.CrashReport;
+-import net.minecraft.CrashReportCategory;
+-import net.minecraft.ReportedException;
+-import net.minecraft.Util;
+-import net.minecraft.network.Connection;
+-import net.minecraft.network.DisconnectionDetails;
+-import net.minecraft.network.PacketSendListener;
+-import net.minecraft.network.chat.Component;
+-import net.minecraft.network.protocol.Packet;
+-import net.minecraft.network.protocol.PacketUtils;
+-import net.minecraft.network.protocol.common.ClientboundDisconnectPacket;
+-import net.minecraft.network.protocol.common.ClientboundKeepAlivePacket;
+-import net.minecraft.network.protocol.common.ServerCommonPacketListener;
+-import net.minecraft.network.protocol.common.ServerboundCustomClickActionPacket;
+-import net.minecraft.network.protocol.common.ServerboundCustomPayloadPacket;
+-import net.minecraft.network.protocol.common.ServerboundKeepAlivePacket;
+-import net.minecraft.network.protocol.common.ServerboundPongPacket;
+-import net.minecraft.network.protocol.common.ServerboundResourcePackPacket;
+-import net.minecraft.network.protocol.cookie.ServerboundCookieResponsePacket;
+-import net.minecraft.server.MinecraftServer;
+-import net.minecraft.server.level.ClientInformation;
+-import net.minecraft.util.VisibleForDebug;
+-import net.minecraft.util.profiling.Profiler;
+-import org.slf4j.Logger;
+-
+ public abstract class ServerCommonPacketListenerImpl implements net.minecraft.network.protocol.common.ServerCommonPacketListener {
+     private static final org.slf4j.Logger LOGGER = com.mojang.logging.LogUtils.getLogger();
+     public static final int LATENCY_CHECK_INTERVAL = 15000;
+@@ -323,68 +294,116 @@ public abstract class ServerCommonPacketListenerImpl implements net.minecraft.ne
+             return;
+         }
+ 
+-        net.minecraft.server.level.Techhider techhider = serverPlayer.getBukkitEntity().getTechhider();
++        org.bukkit.craftbukkit.entity.CraftPlayer player = serverPlayer.getBukkitEntity();
++        org.bukkit.craftbukkit.CraftCoreHider coreHider = server.server.getCoreHider();
++
+         switch (packet) {
+             case net.minecraft.network.protocol.game.ClientboundBlockUpdatePacket blockUpdatePacket -> {
+                 net.minecraft.world.level.block.state.BlockState original = blockUpdatePacket.blockState;
+-                boolean hullHide = techhider.getHullHider().shouldFillEndstone(blockUpdatePacket.getPos());
+-                if ((techhider.shouldHideChunk(blockUpdatePacket.getPos()) && techhider.isHidden(original)) || hullHide) {
+-                    packet = new net.minecraft.network.protocol.game.ClientboundBlockUpdatePacket(blockUpdatePacket.getPos(), techhider.getObfuscationState());
++                boolean hullHide = coreHider.shouldHideCore(blockUpdatePacket.getPos(), player.getUniqueId());
++
++                org.bukkit.Material material = original.getBukkitMaterial();
++                if (original.hasProperty(net.minecraft.world.level.block.state.properties.BlockStateProperties.WATERLOGGED) && original.getValue(net.minecraft.world.level.block.state.properties.BlockStateProperties.WATERLOGGED))
++                    material = org.bukkit.Material.WATER;
++                if (org.bukkit.craftbukkit.BlockHider.shouldHide(player, material, blockUpdatePacket.getPos()) || player.hasXray() || hullHide) {
++                    packet = new net.minecraft.network.protocol.game.ClientboundBlockUpdatePacket(blockUpdatePacket.getPos(), org.bukkit.craftbukkit.BlockHider.getState(player));
+                 }
++
++                // if ((techhider.shouldHideChunk(blockUpdatePacket.getPos()) && techhider.isHidden(original)) || hullHide) {
++                //     packet = new net.minecraft.network.protocol.game.ClientboundBlockUpdatePacket(blockUpdatePacket.getPos(), techhider.getObfuscationState());
++                // }
+             }
+             case net.minecraft.network.protocol.game.ClientboundSectionBlocksUpdatePacket sectionUpdate -> {
+                 net.minecraft.world.level.block.state.BlockState[] originalStates = sectionUpdate.getStates();
+ 
+-                boolean hullHide = techhider.getHullHider().shouldFillEndstone(sectionUpdate.getSectionPos().center());
+-                if (techhider.shouldHideChunk(sectionUpdate.getSectionPos().center())) {
++                boolean hullHide = coreHider.shouldHideCore(sectionUpdate.getSectionPos().center(), player.getUniqueId());
+ 
+-                    boolean needsModify = false;
+-                    for (net.minecraft.world.level.block.state.BlockState state : originalStates) {
+-                        if (techhider.isHidden(state) || hullHide) {
+-                            needsModify = true;
+-                            break;
+-                        }
+-                    }
++                short[] positions = sectionUpdate.getPositions();
++                net.minecraft.core.SectionPos sectionPos = sectionUpdate.getSectionPos();
+ 
+-                    if (needsModify) {
+-                        net.minecraft.world.level.block.state.BlockState[] newStates = new net.minecraft.world.level.block.state.BlockState[originalStates.length];
+-                        for (int i = 0; i < originalStates.length; i++) {
+-                            newStates[i] = techhider.isHidden(originalStates[i]) || hullHide
+-                                ? techhider.getObfuscationState()
+-                                : originalStates[i];
+-                        }
+-
+-                        packet = new net.minecraft.network.protocol.game.ClientboundSectionBlocksUpdatePacket(
+-                            sectionUpdate.getSectionPos(),
+-                            sectionUpdate.getPositions(), // FastUtil-Wrapper
+-                            newStates
+-                        );
+-                    }
++                net.minecraft.world.level.block.state.BlockState disguise = org.bukkit.craftbukkit.BlockHider.getState(player);
++                net.minecraft.world.level.block.state.BlockState[] newStates = new net.minecraft.world.level.block.state.BlockState[originalStates.length];
++
++                for (int i = 0; i < originalStates.length; i++) {
++                    net.minecraft.world.level.block.state.BlockState state = originalStates[i];
++                    short posShort = positions[i];
++                    int x = sectionPos.minBlockX() + (posShort >> 8 & 15);
++                    int y = sectionPos.minBlockY() + (posShort & 15);
++                    int z = sectionPos.minBlockZ() + (posShort >> 4 & 15);
++                    net.minecraft.core.BlockPos blockPos = new net.minecraft.core.BlockPos(x, y, z);
++
++                    org.bukkit.Material material = state.getBukkitMaterial();
++
++                    if (state.hasProperty(net.minecraft.world.level.block.state.properties.BlockStateProperties.WATERLOGGED) && state.getValue(net.minecraft.world.level.block.state.properties.BlockStateProperties.WATERLOGGED))
++                        material = org.bukkit.Material.WATER;
++                    newStates[i] = org.bukkit.craftbukkit.BlockHider.shouldHide(player, material, blockPos) || hullHide
++                        ? disguise
++                        : state;
++
++
++                    packet = new net.minecraft.network.protocol.game.ClientboundSectionBlocksUpdatePacket(
++                        sectionPos,
++                        positions,
++                        newStates
++                    );
+                 }
++
++                // if (techhider.shouldHideChunk(sectionUpdate.getSectionPos().center())) {
++                //
++                //     boolean needsModify = false;
++                //     for (net.minecraft.world.level.block.state.BlockState state : originalStates) {
++                //         if (techhider.isHidden(state) || hullHide) {
++                //             needsModify = true;
++                //             break;
++                //         }
++                //     }
++                //
++                //     if (needsModify) {
++                //         net.minecraft.world.level.block.state.BlockState[] newStates = new net.minecraft.world.level.block.state.BlockState[originalStates.length];
++                //         for (int i = 0; i < originalStates.length; i++) {
++                //             newStates[i] = techhider.isHidden(originalStates[i]) || hullHide
++                //                 ? techhider.getObfuscationState()
++                //                 : originalStates[i];
++                //         }
++                //
++                //         packet = new net.minecraft.network.protocol.game.ClientboundSectionBlocksUpdatePacket(
++                //             sectionUpdate.getSectionPos(),
++                //             sectionUpdate.getPositions(), // FastUtil-Wrapper
++                //             newStates
++                //         );
++                //     }
++                // }
+             }
+             case net.minecraft.network.protocol.game.ClientboundBlockEventPacket blockEventPacket -> {
+-                boolean hullHide = techhider.getHullHider().shouldFillEndstone(blockEventPacket.getPos());
+-                if ((techhider.shouldHideChunk(blockEventPacket.getPos()) && techhider.isHidden(blockEventPacket.getBlock().defaultBlockState())) || hullHide) {
+-                    return;
++                boolean hullHide = coreHider.shouldHideCore(blockEventPacket.getPos(), player.getUniqueId());
++
++                if (org.bukkit.craftbukkit.BlockHider.shouldHide(player, blockEventPacket.getBlock().defaultBlockState().getBukkitMaterial(), blockEventPacket.getPos()) || player.hasXray() || hullHide) {
++                    packet = new net.minecraft.network.protocol.game.ClientboundBlockUpdatePacket(blockEventPacket.getPos(), org.bukkit.craftbukkit.BlockHider.getState(player));
+                 }
++
++                // if ((techhider.shouldHideChunk(blockEventPacket.getPos()) && techhider.isHidden(blockEventPacket.getBlock().defaultBlockState())) || hullHide) {
++                //     return;
++                // }
+             }
+             case net.minecraft.network.protocol.game.ClientboundLevelChunkWithLightPacket chunkWithLightPacket -> {
+                 if (chunkWithLightPacket.isNeedModifying()) {
+-                    if (techhider.shouldHideChunk(chunkWithLightPacket.getLevelChunk())) {
+-                        serverPlayer.getBukkitEntity().getWorld().refreshChunk(chunkWithLightPacket.getX(), chunkWithLightPacket.getZ());
+-                        return;
+-                    }
++                    PlayerChunkSender.sendChunk(serverPlayer.connection, serverPlayer.level(), chunkWithLightPacket.getLevelChunk());
++                    return;
+                 }
+             }
+             case net.minecraft.network.protocol.game.ClientboundSoundPacket soundPacket -> {
+-                int soundChunkX = net.minecraft.core.SectionPos.blockToSectionCoord(soundPacket.getX());
+-                int soundChunkZ = net.minecraft.core.SectionPos.blockToSectionCoord(soundPacket.getZ());
+-
+-                net.minecraft.world.level.chunk.LevelChunk soundChunk = serverPlayer.level().getChunkSource().getChunkNow(soundChunkX, soundChunkZ);
+-
+-                if(soundChunk != null) {
+-                    if(techhider.shouldHideChunk(soundChunk)) return;
+-                }
++                boolean hullHide = coreHider.shouldHideCore(new net.minecraft.core.BlockPos((int) soundPacket.getX(), (int) soundPacket.getY(), (int) soundPacket.getZ()), player.getUniqueId());
++
++                if (hullHide) return;
++
++                // int soundChunkX = net.minecraft.core.SectionPos.blockToSectionCoord(soundPacket.getX());
++                // int soundChunkZ = net.minecraft.core.SectionPos.blockToSectionCoord(soundPacket.getZ());
++                //
++                // net.minecraft.world.level.chunk.LevelChunk soundChunk = serverPlayer.level().getChunkSource().getChunkNow(soundChunkX, soundChunkZ);
++                //
++                // if(soundChunk != null) {
++                //     if(techhider.shouldHideChunk(soundChunk)) return;
++                // }
+             }
+             default -> {
+             }
+diff --git a/net/minecraft/server/network/ServerGamePacketListenerImpl.java b/net/minecraft/server/network/ServerGamePacketListenerImpl.java
+index 08f73cae4ffe17fd96c60574762e04101aa5a41e..feb0fbd9c276331490a85dd3fe7a48b7094bc346 100644
+--- a/net/minecraft/server/network/ServerGamePacketListenerImpl.java
++++ b/net/minecraft/server/network/ServerGamePacketListenerImpl.java
+@@ -8,8 +8,9 @@ import com.mojang.brigadier.ParseResults;
+ import com.mojang.brigadier.StringReader;
+ import com.mojang.brigadier.suggestion.Suggestions;
+ import com.mojang.logging.LogUtils;
+-import it.unimi.dsi.fastutil.ints.Int2ObjectMaps;
++import io.papermc.paper.adventure.PaperAdventure;
+ import it.unimi.dsi.fastutil.ints.Int2ObjectMap.Entry;
++import it.unimi.dsi.fastutil.ints.Int2ObjectMaps;
+ import it.unimi.dsi.fastutil.objects.Object2ObjectOpenHashMap;
+ import java.net.SocketAddress;
+ import java.util.Collections;
+@@ -173,6 +174,7 @@ import net.minecraft.world.inventory.BeaconMenu;
+ import net.minecraft.world.inventory.CrafterMenu;
+ import net.minecraft.world.inventory.MerchantMenu;
+ import net.minecraft.world.inventory.RecipeBookMenu;
++import net.minecraft.world.inventory.Slot;
+ import net.minecraft.world.item.BlockItem;
+ import net.minecraft.world.item.BucketItem;
+ import net.minecraft.world.item.Item;
+@@ -197,21 +199,15 @@ import net.minecraft.world.level.block.entity.SignBlockEntity;
+ import net.minecraft.world.level.block.entity.StructureBlockEntity;
+ import net.minecraft.world.level.block.entity.TestBlockEntity;
+ import net.minecraft.world.level.block.entity.TestInstanceBlockEntity;
+-import net.minecraft.world.level.block.state.BlockBehaviour;
+ import net.minecraft.world.level.block.state.BlockState;
+ import net.minecraft.world.level.storage.TagValueOutput;
+ import net.minecraft.world.phys.AABB;
+ import net.minecraft.world.phys.BlockHitResult;
++import net.minecraft.world.phys.HitResult;
+ import net.minecraft.world.phys.Vec3;
+ import net.minecraft.world.phys.shapes.BooleanOp;
+ import net.minecraft.world.phys.shapes.Shapes;
+ import net.minecraft.world.phys.shapes.VoxelShape;
+-import org.slf4j.Logger;
+-
+-// CraftBukkit start
+-import io.papermc.paper.adventure.PaperAdventure; // Paper
+-import net.minecraft.world.inventory.Slot;
+-import net.minecraft.world.phys.HitResult;
+ import org.bukkit.Location;
+ import org.bukkit.NamespacedKey;
+ import org.bukkit.craftbukkit.entity.CraftEntity;
+@@ -238,6 +234,7 @@ import org.bukkit.event.player.PlayerSwapHandItemsEvent;
+ import org.bukkit.event.player.PlayerTeleportEvent;
+ import org.bukkit.event.player.PlayerToggleFlightEvent;
+ import org.bukkit.event.player.PlayerToggleSprintEvent;
++import org.slf4j.Logger;
+ // CraftBukkit end
+ 
+ public class ServerGamePacketListenerImpl
+@@ -1003,7 +1000,7 @@ public class ServerGamePacketListenerImpl
+         PacketUtils.ensureRunningOnSameThread(packet, this, serverLevel);
+         BlockPos blockPos = packet.pos();
+ 
+-        net.minecraft.server.level.Techhider techhider = player.getBukkitEntity().getTechhider();
++        // net.minecraft.server.level.Techhider techhider = player.getBukkitEntity().getTechhider();
+ 
+         if (this.player.canInteractWithBlock(blockPos, 1.0)) {
+             if (serverLevel.isLoaded(blockPos)) {
+@@ -1012,10 +1009,16 @@ public class ServerGamePacketListenerImpl
+                 boolean flag = this.player.hasInfiniteMaterials() && packet.includeData();
+                 ItemStack cloneItemStack = blockState.getCloneItemStack(serverLevel, blockPos, flag);
+ 
+-                if(techhider.shouldHideChunk(serverLevel.getChunk(blockPos.getX(), blockPos.getZ())) && techhider.isHidden(blockState)) {
+-                    cloneItemStack = net.minecraft.server.level.Techhider.ENDSTONE.getCloneItemStack(serverLevel, blockPos, flag);
++                org.bukkit.Material material = blockState.getBukkitMaterial();
++                if(blockState.hasProperty(net.minecraft.world.level.block.state.properties.BlockStateProperties.WATERLOGGED) && blockState.getValue(net.minecraft.world.level.block.state.properties.BlockStateProperties.WATERLOGGED)) material = org.bukkit.Material.WATER;
++                if(org.bukkit.craftbukkit.BlockHider.shouldHide(player.getBukkitEntity(), material, blockPos)) {
++                    cloneItemStack = org.bukkit.craftbukkit.BlockHider.ENDSTONE.getCloneItemStack(serverLevel, blockPos, flag);
+                 }
+ 
++                // if(techhider.shouldHideChunk(serverLevel.getChunk(blockPos.getX(), blockPos.getZ())) && techhider.isHidden(blockState)) {
++                //     cloneItemStack = net.minecraft.server.level.Techhider.ENDSTONE.getCloneItemStack(serverLevel, blockPos, flag);
++                // }
++
+                 if (!cloneItemStack.isEmpty()) {
+                     if (flag && this.player.getBukkitEntity().hasPermission("minecraft.nbt.copy")) { // Spigot
+                         addBlockDataToItem(blockState, serverLevel, blockPos, cloneItemStack);
+diff --git a/net/minecraft/server/players/PlayerList.java b/net/minecraft/server/players/PlayerList.java
+index 36a9f06814c310d5a592152bdabe4c182493348f..f40bfe71741f2c22bdade119e7b7af8f6674b95a 100644
+--- a/net/minecraft/server/players/PlayerList.java
++++ b/net/minecraft/server/players/PlayerList.java
+@@ -504,12 +504,10 @@ public abstract class PlayerList {
+ 
+     public @Nullable net.kyori.adventure.text.Component remove(ServerPlayer player) { // CraftBukkit - return string // Paper - return Component
+         // Paper start - Fix kick event leave message not being sent
+-        net.minecraft.server.level.Techhider.removeInstance(player.getUUID());
+         return this.remove(player, net.kyori.adventure.text.Component.translatable("multiplayer.player.left", net.kyori.adventure.text.format.NamedTextColor.YELLOW, io.papermc.paper.configuration.GlobalConfiguration.get().messages.useDisplayNameInQuitMessage ? player.getBukkitEntity().displayName() : io.papermc.paper.adventure.PaperAdventure.asAdventure(player.getDisplayName())));
+     }
+     public @Nullable net.kyori.adventure.text.Component remove(ServerPlayer player, net.kyori.adventure.text.Component leaveMessage) {
+         // Paper end - Fix kick event leave message not being sent
+-        net.minecraft.server.level.Techhider.removeInstance(player.getUUID());
+         ServerLevel serverLevel = player.level();
+         player.awardStat(Stats.LEAVE_GAME);
+         // CraftBukkit start - Quitting must be before we do final save of data, in case plugins need to modify it
+@@ -520,7 +518,6 @@ public abstract class PlayerList {
+ 
+         org.bukkit.event.player.PlayerQuitEvent playerQuitEvent = new org.bukkit.event.player.PlayerQuitEvent(player.getBukkitEntity(), leaveMessage, player.quitReason); // Paper - Adventure & Add API for quit reason
+         this.cserver.getPluginManager().callEvent(playerQuitEvent);
+-        net.minecraft.server.level.Techhider.removeInstance(player.getUUID());
+         player.getBukkitEntity().disconnect(playerQuitEvent.getQuitMessage());
+ 
+         if (this.server.isSameThread()) player.doTick(); // SPIGOT-924 // Paper - Improved watchdog support; don't tick during emergency shutdowns
+diff --git a/net/minecraft/world/entity/LivingEntity.java b/net/minecraft/world/entity/LivingEntity.java
+index 3bc15869fde6027322df3ced13d7152e18f97e34..068f3d06c36485fb74051054f228dad24acd1751 100644
+--- a/net/minecraft/world/entity/LivingEntity.java
++++ b/net/minecraft/world/entity/LivingEntity.java
+@@ -282,7 +282,11 @@ public abstract class LivingEntity extends Entity implements Attackable, Waypoin
+     public boolean collides = true;
+     public Set<UUID> collidableExemptions = new java.util.HashSet<>();
+     public boolean bukkitPickUpLoot;
+-    public org.bukkit.craftbukkit.entity.CraftLivingEntity getBukkitLivingEntity() { return (org.bukkit.craftbukkit.entity.CraftLivingEntity) super.getBukkitEntity(); } // Paper
++
++    public org.bukkit.craftbukkit.entity.CraftLivingEntity getBukkitLivingEntity() {
++        return (org.bukkit.craftbukkit.entity.CraftLivingEntity) super.getBukkitEntity();
++    } // Paper
++
+     public boolean silentDeath = false; // Paper - mark entity as dying silently for cancellable death event
+     public net.kyori.adventure.util.TriState frictionState = net.kyori.adventure.util.TriState.NOT_SET; // Paper - Friction API
+     public int shieldBlockingDelay = this.level().paperConfig().misc.shieldBlockingDelay; // Paper - Make shield blocking delay configurable
+@@ -297,7 +301,7 @@ public abstract class LivingEntity extends Entity implements Attackable, Waypoin
+         this.equipment = this.createEquipment();
+         this.blocksBuilding = true;
+         this.reapplyPosition();
+-        this.setYRot((float)(Math.random() * (float) (Math.PI * 2)));
++        this.setYRot((float) (Math.random() * (float) (Math.PI * 2)));
+         this.yHeadRot = this.getYRot();
+         this.brain = this.makeBrain(EMPTY_BRAIN);
+     }
+@@ -332,7 +336,7 @@ public abstract class LivingEntity extends Entity implements Attackable, Waypoin
+ 
+     @Override
+     protected void defineSynchedData(SynchedEntityData.Builder builder) {
+-        builder.define(DATA_LIVING_ENTITY_FLAGS, (byte)0);
++        builder.define(DATA_LIVING_ENTITY_FLAGS, (byte) 0);
+         builder.define(DATA_EFFECT_PARTICLES, List.of());
+         builder.define(DATA_EFFECT_AMBIENCE_ID, false);
+         builder.define(DATA_ARROW_COUNT_ID, 0);
+@@ -388,18 +392,24 @@ public abstract class LivingEntity extends Entity implements Attackable, Waypoin
+                 }
+ 
+                 double d1 = Math.min(0.2F + d / 15.0, 2.5);
+-                int i = (int)(150.0 * d1);
++                int i = (int) (150.0 * d1);
+                 // CraftBukkit start - visibility api
+                 if (this instanceof ServerPlayer serverPlayer) {
+-                    net.minecraft.server.level.Techhider techhider = serverPlayer.getBukkitEntity().getTechhider();
+ 
+-                    if(techhider.shouldHideChunk(serverLevel.getChunk(blockPos.getX(), blockPos.getZ())) && techhider.isHidden(state)) {
+-                        state = techhider.getObfuscationState();
++                    org.bukkit.Material material = state.getBukkitMaterial();
++                    if(state.hasProperty(net.minecraft.world.level.block.state.properties.BlockStateProperties.WATERLOGGED) && state.getValue(net.minecraft.world.level.block.state.properties.BlockStateProperties.WATERLOGGED)) material = org.bukkit.Material.WATER;
++                    if (org.bukkit.craftbukkit.BlockHider.shouldHide(serverPlayer.getBukkitEntity(), material, blockPos)) {
++                        state = org.bukkit.craftbukkit.BlockHider.getState(serverPlayer.getBukkitEntity());
+                     }
+ 
++                    // net.minecraft.server.level.Techhider techhider = serverPlayer.getBukkitEntity().getTechhider();
++                    // if (techhider.shouldHideChunk(serverLevel.getChunk(blockPos.getX(), blockPos.getZ())) && techhider.isHidden(state)) {
++                    //     state = techhider.getObfuscationState();
++                    // }
++
+                     serverLevel.sendParticlesSource((ServerPlayer) this, new BlockParticleOption(ParticleTypes.BLOCK, state), false, false, x, y1, z, i, 0.0, 0.0, 0.0, 0.15F);
+                 } else {
+-                    serverLevel.sendParticles(new BlockParticleOption(ParticleTypes.BLOCK, net.minecraft.server.level.Techhider.ENDSTONE), x, y1, z, i, 0.0, 0.0, 0.0, 0.15F);
++                    serverLevel.sendParticles(new BlockParticleOption(ParticleTypes.BLOCK, org.bukkit.craftbukkit.BlockHider.ENDSTONE), x, y1, z, i, 0.0, 0.0, 0.0, 0.15F);
+                 }
+                 // CraftBukkit end
+             }
+@@ -459,12 +469,12 @@ public abstract class LivingEntity extends Entity implements Attackable, Waypoin
+                 && !serverLevel1.getBlockState(BlockPos.containing(this.getX(), this.getEyeY(), this.getZ())).is(Blocks.BUBBLE_COLUMN)) {
+                 boolean flag1 = !this.canBreatheUnderwater()
+                     && !MobEffectUtil.hasWaterBreathing(this)
+-                    && (!flag || !((Player)this).getAbilities().invulnerable);
++                    && (!flag || !((Player) this).getAbilities().invulnerable);
+                 if (flag1) {
+                     this.setAirSupply(this.decreaseAirSupply(this.getAirSupply()));
+                     if (this.getAirSupply() == -20) {
+                         this.setAirSupply(0);
+-                        serverLevel1.broadcastEntityEvent(this, (byte)67);
++                        serverLevel1.broadcastEntityEvent(this, (byte) 67);
+                         this.hurtServer(serverLevel1, this.damageSources().drown(), 2.0F);
+                     }
+                 } else if (this.getAirSupply() < this.getMaxAirSupply()) {
+@@ -526,7 +536,7 @@ public abstract class LivingEntity extends Entity implements Attackable, Waypoin
+ 
+     @Override
+     protected float getBlockSpeedFactor() {
+-        return Mth.lerp((float)this.getAttributeValue(Attributes.MOVEMENT_EFFICIENCY), super.getBlockSpeedFactor(), 1.0F);
++        return Mth.lerp((float) this.getAttributeValue(Attributes.MOVEMENT_EFFICIENCY), super.getBlockSpeedFactor(), 1.0F);
+     }
+ 
+     public float getLuck() {
+@@ -571,7 +581,7 @@ public abstract class LivingEntity extends Entity implements Attackable, Waypoin
+ 
+     public final float getScale() {
+         AttributeMap attributes = this.getAttributes();
+-        return attributes == null ? 1.0F : this.sanitizeScale((float)attributes.getValue(Attributes.SCALE));
++        return attributes == null ? 1.0F : this.sanitizeScale((float) attributes.getValue(Attributes.SCALE));
+     }
+ 
+     protected float sanitizeScale(float scale) {
+@@ -585,7 +595,7 @@ public abstract class LivingEntity extends Entity implements Attackable, Waypoin
+     protected void tickDeath() {
+         this.deathTime++;
+         if (this.deathTime >= 20 && !this.level().isClientSide() && !this.isRemoved()) {
+-            this.level().broadcastEntityEvent(this, (byte)60);
++            this.level().broadcastEntityEvent(this, (byte) 60);
+             this.remove(Entity.RemovalReason.KILLED, org.bukkit.event.entity.EntityRemoveEvent.Cause.DEATH); // CraftBukkit - add Bukkit remove cause
+         }
+     }
+@@ -674,7 +684,7 @@ public abstract class LivingEntity extends Entity implements Attackable, Waypoin
+ 
+     public void setLastHurtMob(Entity entity) {
+         if (entity instanceof LivingEntity) {
+-            this.lastHurtMob = (LivingEntity)entity;
++            this.lastHurtMob = (LivingEntity) entity;
+         } else {
+             this.lastHurtMob = null;
+         }
+@@ -706,6 +716,7 @@ public abstract class LivingEntity extends Entity implements Attackable, Waypoin
+         // CraftBukkit start
+         this.onEquipItem(slot, oldItem, newItem, false);
+     }
++
+     public void onEquipItem(EquipmentSlot slot, ItemStack oldItem, ItemStack newItem, boolean silent) {
+         // CraftBukkit end
+         if (!this.level().isClientSide() && !this.isSpectator()) {
+@@ -751,7 +762,7 @@ public abstract class LivingEntity extends Entity implements Attackable, Waypoin
+     public void onRemoval(Entity.RemovalReason reason) {
+         super.onRemoval(reason);
+         if (this.level() instanceof ServerLevel serverLevel) {
+-            serverLevel.getWaypointManager().untrackWaypoint((WaypointTransmitter)this);
++            serverLevel.getWaypointManager().untrackWaypoint((WaypointTransmitter) this);
+         }
+     }
+ 
+@@ -772,9 +783,9 @@ public abstract class LivingEntity extends Entity implements Attackable, Waypoin
+         }
+         // Paper end - Friction API
+         output.putFloat("Health", this.getHealth());
+-        output.putShort("HurtTime", (short)this.hurtTime);
++        output.putShort("HurtTime", (short) this.hurtTime);
+         output.putInt("HurtByTimestamp", this.lastHurtByMobTimestamp);
+-        output.putShort("DeathTime", (short)this.deathTime);
++        output.putShort("DeathTime", (short) this.deathTime);
+         output.putFloat("AbsorptionAmount", this.getAbsorptionAmount());
+         output.store("attributes", AttributeInstance.Packed.LIST_CODEC, this.getAttributes().pack());
+         if (!this.activeEffects.isEmpty()) {
+@@ -784,7 +795,7 @@ public abstract class LivingEntity extends Entity implements Attackable, Waypoin
+         output.putBoolean("FallFlying", this.isFallFlying());
+         this.getSleepingPos().ifPresent(blockPos -> output.store("sleeping_pos", BlockPos.CODEC, blockPos));
+         DataResult<Dynamic<?>> dataResult = this.brain.serializeStart(NbtOps.INSTANCE).map(tag -> new Dynamic<>(NbtOps.INSTANCE, tag));
+-        dataResult.resultOrPartial(LOGGER::error).ifPresent(dynamic -> output.store("Brain", Codec.PASSTHROUGH, (Dynamic<?>)dynamic));
++        dataResult.resultOrPartial(LOGGER::error).ifPresent(dynamic -> output.store("Brain", Codec.PASSTHROUGH, (Dynamic<?>) dynamic));
+         if (this.lastHurtByPlayer != null) {
+             this.lastHurtByPlayer.store(output, "last_hurt_by_player");
+             output.putInt("last_hurt_by_player_memory_time", this.lastHurtByPlayerMemoryTime);
+@@ -822,7 +833,8 @@ public abstract class LivingEntity extends Entity implements Attackable, Waypoin
+             ItemEntity itemEntity = this.createItemStackToDrop(stack, randomizeMotion, includeThrower);
+             if (itemEntity != null) {
+                 // CraftBukkit start - fire PlayerDropItemEvent
+-                if (entityOperation != null) entityOperation.accept((org.bukkit.entity.Item) itemEntity.getBukkitEntity());
++                if (entityOperation != null)
++                    entityOperation.accept((org.bukkit.entity.Item) itemEntity.getBukkitEntity());
+                 if (callEvent && this.getBukkitEntity() instanceof org.bukkit.entity.Player player) {
+                     org.bukkit.entity.Item drop = (org.bukkit.entity.Item) itemEntity.getBukkitEntity();
+ 
+@@ -888,13 +900,15 @@ public abstract class LivingEntity extends Entity implements Attackable, Waypoin
+         });
+         // CraftBukkit end
+         this.setHealth(input.getFloatOr("Health", this.getMaxHealth()));
+-        this.hurtTime = input.getShortOr("HurtTime", (short)0);
+-        this.deathTime = input.getShortOr("DeathTime", (short)0);
++        this.hurtTime = input.getShortOr("HurtTime", (short) 0);
++        this.deathTime = input.getShortOr("DeathTime", (short) 0);
+         this.lastHurtByMobTimestamp = input.getIntOr("HurtByTimestamp", 0);
+         input.getString("Team").ifPresent(string -> {
+             Scoreboard scoreboard = this.level().getScoreboard();
+             PlayerTeam playerTeam = scoreboard.getPlayerTeam(string);
+-            if (!this.level().paperConfig().scoreboards.allowNonPlayerEntitiesOnScoreboards && !(this instanceof net.minecraft.world.entity.player.Player)) { playerTeam = null; } // Paper - Perf: Disable Scoreboards for non players by default
++            if (!this.level().paperConfig().scoreboards.allowNonPlayerEntitiesOnScoreboards && !(this instanceof net.minecraft.world.entity.player.Player)) {
++                playerTeam = null;
++            } // Paper - Perf: Disable Scoreboards for non players by default
+             boolean flag = playerTeam != null && scoreboard.addPlayerToTeam(this.getStringUUID(), playerTeam);
+             if (!flag) {
+                 LOGGER.warn("Unable to add mob to team \"{}\" (that team probably doesn't exist)", string);
+@@ -903,14 +917,14 @@ public abstract class LivingEntity extends Entity implements Attackable, Waypoin
+         this.setSharedFlag(7, input.getBooleanOr("FallFlying", false));
+         input.read("sleeping_pos", BlockPos.CODEC).ifPresentOrElse(blockPos -> {
+             if (this.position().distanceToSqr(blockPos.getX(), blockPos.getY(), blockPos.getZ()) < Mth.square(16)) { // Paper - The sleeping pos will always also set the actual pos, so a desync suggests something is wrong
+-            this.setSleepingPos(blockPos);
+-            this.entityData.set(DATA_POSE, Pose.SLEEPING);
+-            if (!this.firstTick) {
+-                this.setPosToBed(blockPos);
+-            }
++                this.setSleepingPos(blockPos);
++                this.entityData.set(DATA_POSE, Pose.SLEEPING);
++                if (!this.firstTick) {
++                    this.setPosToBed(blockPos);
++                }
+             } // Paper - The sleeping pos will always also set the actual pos, so a desync suggests something is wrong
+         }, this::clearSleepingPos);
+-        input.read("Brain", Codec.PASSTHROUGH).ifPresent(dynamic -> this.brain = this.makeBrain((Dynamic<?>)dynamic));
++        input.read("Brain", Codec.PASSTHROUGH).ifPresent(dynamic -> this.brain = this.makeBrain((Dynamic<?>) dynamic));
+         this.lastHurtByPlayer = EntityReference.read(input, "last_hurt_by_player");
+         this.lastHurtByPlayerMemoryTime = input.getIntOr("last_hurt_by_player_memory_time", 0);
+         this.lastHurtByMob = EntityReference.read(input, "last_hurt_by_mob");
+@@ -1087,6 +1101,7 @@ public abstract class LivingEntity extends Entity implements Attackable, Waypoin
+         // CraftBukkit start
+         return this.removeAllEffects(org.bukkit.event.entity.EntityPotionEffectEvent.Cause.UNKNOWN);
+     }
++
+     public boolean removeAllEffects(EntityPotionEffectEvent.Cause cause) {
+         // CraftBukkit end
+         if (this.level().isClientSide) {
+@@ -1153,6 +1168,7 @@ public abstract class LivingEntity extends Entity implements Attackable, Waypoin
+         // Paper start - Don't fire sync event during generation
+         return this.addEffect(effectInstance, entity, cause, true);
+     }
++
+     public boolean addEffect(MobEffectInstance effectInstance, @Nullable Entity entity, EntityPotionEffectEvent.Cause cause, boolean fireEvent) {
+         // Paper end - Don't fire sync event during generation
+         // org.spigotmc.AsyncCatcher.catchOp("effect add"); // Spigot // Paper - move to API
+@@ -1173,11 +1189,11 @@ public abstract class LivingEntity extends Entity implements Attackable, Waypoin
+             }
+ 
+             if (fireEvent) { // Paper - Don't fire sync event during generation
+-            EntityPotionEffectEvent event = CraftEventFactory.callEntityPotionEffectChangeEvent(this, mobEffectInstance, effectInstance, cause, override);
+-            override = event.isOverride(); // Paper - Don't fire sync event during generation
+-            if (event.isCancelled()) {
+-                return false;
+-            }
++                EntityPotionEffectEvent event = CraftEventFactory.callEntityPotionEffectChangeEvent(this, mobEffectInstance, effectInstance, cause, override);
++                override = event.isOverride(); // Paper - Don't fire sync event during generation
++                if (event.isCancelled()) {
++                    return false;
++                }
+             } // Paper - Don't fire sync event during generation
+             // CraftBukkit end
+             if (mobEffectInstance == null) {
+@@ -1204,7 +1220,7 @@ public abstract class LivingEntity extends Entity implements Attackable, Waypoin
+             return this.getType().is(EntityTypeTags.IMMUNE_TO_OOZING)
+                 ? !effectInstance.is(MobEffects.OOZING)
+                 : !this.getType().is(EntityTypeTags.IGNORES_POISON_AND_REGEN)
+-                    || !effectInstance.is(MobEffects.REGENERATION) && !effectInstance.is(MobEffects.POISON);
++                || !effectInstance.is(MobEffects.REGENERATION) && !effectInstance.is(MobEffects.POISON);
+         }
+     }
+ 
+@@ -1339,9 +1355,9 @@ public abstract class LivingEntity extends Entity implements Attackable, Waypoin
+         } else if (attribute.is(Attributes.WAYPOINT_TRANSMIT_RANGE) && this.level() instanceof ServerLevel serverLevel) {
+             ServerWaypointManager waypointManager = serverLevel.getWaypointManager();
+             if (this.attributes.getValue(attribute) > 0.0) {
+-                waypointManager.trackWaypoint((WaypointTransmitter)this);
++                waypointManager.trackWaypoint((WaypointTransmitter) this);
+             } else {
+-                waypointManager.untrackWaypoint((WaypointTransmitter)this);
++                waypointManager.untrackWaypoint((WaypointTransmitter) this);
+             }
+         }
+     }
+@@ -1384,9 +1400,12 @@ public abstract class LivingEntity extends Entity implements Attackable, Waypoin
+ 
+     public void setHealth(float health) {
+         // Paper start - Check for NaN
+-        if (Float.isNaN(health)) { health = getMaxHealth(); if (this.valid) {
+-            System.err.println("[NAN-HEALTH] " + getScoreboardName() + " had NaN health set");
+-        } } // Paper end - Check for NaN
++        if (Float.isNaN(health)) {
++            health = getMaxHealth();
++            if (this.valid) {
++                System.err.println("[NAN-HEALTH] " + getScoreboardName() + " had NaN health set");
++            }
++        } // Paper end - Check for NaN
+         // CraftBukkit start - Handle scaled health
+         if (this instanceof ServerPlayer) {
+             org.bukkit.craftbukkit.entity.CraftPlayer player = ((ServerPlayer) this).getBukkitEntity();
+@@ -1463,7 +1482,8 @@ public abstract class LivingEntity extends Entity implements Attackable, Waypoin
+                 if (!this.actuallyHurt(level, damageSource, (float) event.getFinalDamage(), event)) { // Paper - fix invulnerability reduction in EntityDamageEvent - no longer subtract lastHurt, that is part of the damage event calc now
+                     return false;
+                 }
+-                if (this instanceof ServerPlayer && event.getDamage() == 0 && originAmount == 0) return false; // Paper - revert to vanilla damage - players are not affected by damage that is 0 - skip damage if the vanilla damage is 0 and was not modified by plugins in the event.
++                if (this instanceof ServerPlayer && event.getDamage() == 0 && originAmount == 0)
++                    return false; // Paper - revert to vanilla damage - players are not affected by damage that is 0 - skip damage if the vanilla damage is 0 and was not modified by plugins in the event.
+                 // CraftBukkit end
+                 this.lastHurt = amount;
+                 flag1 = false;
+@@ -1476,7 +1496,8 @@ public abstract class LivingEntity extends Entity implements Attackable, Waypoin
+                 if (!this.actuallyHurt(level, damageSource, (float) event.getFinalDamage(), event)) {
+                     return false;
+                 }
+-                if (this instanceof ServerPlayer && event.getDamage() == 0 && originAmount == 0) return false; // Paper - revert to vanilla damage - players are not affected by damage that is 0 - skip damage if the vanilla damage is 0 and was not modified by plugins in the event.
++                if (this instanceof ServerPlayer && event.getDamage() == 0 && originAmount == 0)
++                    return false; // Paper - revert to vanilla damage - players are not affected by damage that is 0 - skip damage if the vanilla damage is 0 and was not modified by plugins in the event.
+                 this.lastHurt = amount;
+                 this.invulnerableTime = this.invulnerableDuration; // CraftBukkit - restore use of maxNoDamageTicks
+                 // this.actuallyHurt(level, damageSource, amount);
+@@ -1597,10 +1618,10 @@ public abstract class LivingEntity extends Entity implements Attackable, Waypoin
+ 
+                         float f = blocksAttacks.resolveBlockedDamage(damageSource, damageAmount, acos);
+                         if (!dryRun) { // Paper
+-                        blocksAttacks.hurtBlockingItem(this.level(), itemBlockingWith, this, this.getUsedItemHand(), f);
+-                        if (!damageSource.is(DamageTypeTags.IS_PROJECTILE) && damageSource.getDirectEntity() instanceof LivingEntity livingEntity && livingEntity.distanceToSqr(this) <= Mth.square(200.0D)) { // Paper - Fix shield disable inconsistency & Check distance in entity interactions
+-                            this.blockUsingItem(level, livingEntity);
+-                        }
++                            blocksAttacks.hurtBlockingItem(this.level(), itemBlockingWith, this, this.getUsedItemHand(), f);
++                            if (!damageSource.is(DamageTypeTags.IS_PROJECTILE) && damageSource.getDirectEntity() instanceof LivingEntity livingEntity && livingEntity.distanceToSqr(this) <= Mth.square(200.0D)) { // Paper - Fix shield disable inconsistency & Check distance in entity interactions
++                                this.blockUsingItem(level, livingEntity);
++                            }
+                         } // Paper
+ 
+                         return f;
+@@ -1756,7 +1777,7 @@ public abstract class LivingEntity extends Entity implements Attackable, Waypoin
+                 }
+                 // Paper end - fix NPE when pre-cancelled EntityResurrectEvent is uncancelled
+                 if (itemStack != null && this instanceof final ServerPlayer serverPlayer) {
+-            // CraftBukkit end
++                    // CraftBukkit end
+                     serverPlayer.awardStat(Stats.ITEM_USED.get(itemStack.getItem()));
+                     CriteriaTriggers.USED_TOTEM.trigger(serverPlayer, itemStack);
+                     this.gameEvent(GameEvent.ITEM_INTERACT_FINISH);
+@@ -1764,7 +1785,7 @@ public abstract class LivingEntity extends Entity implements Attackable, Waypoin
+ 
+                 this.setHealth(1.0F);
+                 deathProtection.applyEffects(itemStack, this);
+-                this.level().broadcastEntityEvent(this, (byte)35);
++                this.level().broadcastEntityEvent(this, (byte) 35);
+             }
+ 
+             return deathProtection != null;
+@@ -1853,7 +1874,8 @@ public abstract class LivingEntity extends Entity implements Attackable, Waypoin
+                     }
+ 
+                     if (!this.level().isClientSide && this.hasCustomName()) {
+-                        if (org.spigotmc.SpigotConfig.logNamedDeaths) LivingEntity.LOGGER.info("Named entity {} died: {}", this, this.getCombatTracker().getDeathMessage().getString()); // Spigot
++                        if (org.spigotmc.SpigotConfig.logNamedDeaths)
++                            LivingEntity.LOGGER.info("Named entity {} died: {}", this, this.getCombatTracker().getDeathMessage().getString()); // Spigot
+                     }
+ 
+                     this.getCombatTracker().recheckStatus();
+@@ -1866,14 +1888,14 @@ public abstract class LivingEntity extends Entity implements Attackable, Waypoin
+                     this.setHealth((float) deathEvent.getReviveHealth());
+                 }
+                 // Paper end
+-                    this.createWitherRose(killCredit);
+-                }
++                this.createWitherRose(killCredit);
++            }
+ 
+             // Paper start
+             if (this.dead) { // Paper
+-                this.level().broadcastEntityEvent(this, (byte)3);
++                this.level().broadcastEntityEvent(this, (byte) 3);
+ 
+-            this.setPose(Pose.DYING);
++                this.setPose(Pose.DYING);
+             }
+             // Paper end
+         }
+@@ -1908,6 +1930,7 @@ public abstract class LivingEntity extends Entity implements Attackable, Waypoin
+     // Paper start
+     protected boolean clearEquipmentSlots = true;
+     protected Set<EquipmentSlot> clearedEquipmentSlots = new java.util.HashSet<>();
++
+     protected org.bukkit.event.entity.EntityDeathEvent dropAllDeathLoot(ServerLevel level, DamageSource damageSource) {
+         // Paper end
+         boolean flag = this.lastHurtByPlayerMemoryTime > 0;
+@@ -1940,14 +1963,16 @@ public abstract class LivingEntity extends Entity implements Attackable, Waypoin
+ 
+     protected void dropEquipment(ServerLevel level) {
+     }
+-    protected void postDeathDropItems(org.bukkit.event.entity.EntityDeathEvent event) {} // Paper - method for post death logic that cannot be ran before the event is potentially cancelled
++
++    protected void postDeathDropItems(org.bukkit.event.entity.EntityDeathEvent event) {
++    } // Paper - method for post death logic that cannot be ran before the event is potentially cancelled
+ 
+     public int getExpReward(ServerLevel level, @Nullable Entity entity) { // CraftBukkit
+         if (!this.wasExperienceConsumed()
+             && (
+-                this.isAlwaysExperienceDropper()
+-                    || this.lastHurtByPlayerMemoryTime > 0 && this.shouldDropExperience() && level.getGameRules().getBoolean(GameRules.RULE_DOMOBLOOT)
+-            )) {
++            this.isAlwaysExperienceDropper()
++                || this.lastHurtByPlayerMemoryTime > 0 && this.shouldDropExperience() && level.getGameRules().getBoolean(GameRules.RULE_DOMOBLOOT)
++        )) {
+             return this.getExperienceReward(level, entity); // CraftBukkit
+         }
+         return 0; // CraftBukkit
+@@ -1970,7 +1995,7 @@ public abstract class LivingEntity extends Entity implements Attackable, Waypoin
+     }
+ 
+     protected float getKnockback(Entity attacker, DamageSource damageSource) {
+-        float f = (float)this.getAttributeValue(Attributes.ATTACK_KNOCKBACK);
++        float f = (float) this.getAttributeValue(Attributes.ATTACK_KNOCKBACK);
+         return this.level() instanceof ServerLevel serverLevel
+             ? EnchantmentHelper.modifyKnockback(serverLevel, this.getWeaponItem(), attacker, damageSource, f)
+             : f;
+@@ -2247,7 +2272,7 @@ public abstract class LivingEntity extends Entity implements Attackable, Waypoin
+ 
+     protected void doHurtEquipment(DamageSource damageSource, float damageAmount, EquipmentSlot... slots) {
+         if (!(damageAmount <= 0.0F)) {
+-            int i = (int)Math.max(1.0F, damageAmount / 4.0F);
++            int i = (int) Math.max(1.0F, damageAmount / 4.0F);
+ 
+             for (EquipmentSlot equipmentSlot : slots) {
+                 ItemStack itemBySlot = this.getItemBySlot(equipmentSlot);
+@@ -2263,7 +2288,7 @@ public abstract class LivingEntity extends Entity implements Attackable, Waypoin
+         if (!damageSource.is(DamageTypeTags.BYPASSES_ARMOR)) {
+             // this.hurtArmor(damageSource, damageAmount); // CraftBukkit - actuallyHurt(DamageSource, float, EntityDamageEvent) for damage handling
+             damageAmount = CombatRules.getDamageAfterAbsorb(
+-                this, damageAmount, damageSource, this.getArmorValue(), (float)this.getAttributeValue(Attributes.ARMOR_TOUGHNESS)
++                this, damageAmount, damageSource, this.getArmorValue(), (float) this.getAttributeValue(Attributes.ARMOR_TOUGHNESS)
+             );
+         }
+ 
+@@ -2284,9 +2309,9 @@ public abstract class LivingEntity extends Entity implements Attackable, Waypoin
+                 float f2 = f1 - damageAmount;
+                 if (f2 > 0.0F && f2 < 3.4028235E37F) {
+                     if (this instanceof ServerPlayer) {
+-                        ((ServerPlayer)this).awardStat(Stats.DAMAGE_RESISTED, Math.round(f2 * 10.0F));
++                        ((ServerPlayer) this).awardStat(Stats.DAMAGE_RESISTED, Math.round(f2 * 10.0F));
+                     } else if (damageSource.getEntity() instanceof ServerPlayer) {
+-                        ((ServerPlayer)damageSource.getEntity()).awardStat(Stats.DAMAGE_DEALT_RESISTED, Math.round(f2 * 10.0F));
++                        ((ServerPlayer) damageSource.getEntity()).awardStat(Stats.DAMAGE_DEALT_RESISTED, Math.round(f2 * 10.0F));
+                     }
+                 }
+             }
+@@ -2523,11 +2548,11 @@ public abstract class LivingEntity extends Entity implements Attackable, Waypoin
+     }
+ 
+     public final float getMaxHealth() {
+-        return (float)this.getAttributeValue(Attributes.MAX_HEALTH);
++        return (float) this.getAttributeValue(Attributes.MAX_HEALTH);
+     }
+ 
+     public final float getMaxAbsorption() {
+-        return (float)this.getAttributeValue(Attributes.MAX_ABSORPTION);
++        return (float) this.getAttributeValue(Attributes.MAX_ABSORPTION);
+     }
+ 
+     public final int getArrowCount() {
+@@ -2575,7 +2600,7 @@ public abstract class LivingEntity extends Entity implements Attackable, Waypoin
+             this.swingingArm = hand;
+             if (this.level() instanceof ServerLevel) {
+                 ClientboundAnimatePacket clientboundAnimatePacket = new ClientboundAnimatePacket(this, hand == InteractionHand.MAIN_HAND ? 0 : 3);
+-                ServerChunkCache chunkSource = ((ServerLevel)this.level()).getChunkSource();
++                ServerChunkCache chunkSource = ((ServerLevel) this.level()).getChunkSource();
+                 if (updateSelf) {
+                     chunkSource.broadcastAndSend(this, clientboundAnimatePacket);
+                 } else {
+@@ -2715,7 +2740,7 @@ public abstract class LivingEntity extends Entity implements Attackable, Waypoin
+             this.swingTime = 0;
+         }
+ 
+-        this.attackAnim = (float)this.swingTime / currentSwingDuration;
++        this.attackAnim = (float) this.swingTime / currentSwingDuration;
+     }
+ 
+     @Nullable
+@@ -2796,12 +2821,13 @@ public abstract class LivingEntity extends Entity implements Attackable, Waypoin
+     }
+ 
+     public void setItemSlot(EquipmentSlot slot, ItemStack stack) {
+-    // Paper start
++        // Paper start
+         this.setItemSlot(slot, stack, false);
+     }
++
+     // CraftBukkit start
+     public void setItemSlot(EquipmentSlot slot, ItemStack stack, boolean silent) {
+-    // Paper end
++        // Paper end
+         this.onEquipItem(slot, this.equipment.set(slot, stack), stack, silent);
+     }
+ 
+@@ -2821,7 +2847,7 @@ public abstract class LivingEntity extends Entity implements Attackable, Waypoin
+             }
+         }
+ 
+-        return i > 0 ? (float)i1 / i : 0.0F;
++        return i > 0 ? (float) i1 / i : 0.0F;
+     }
+ 
+     @Override
+@@ -2889,7 +2915,7 @@ public abstract class LivingEntity extends Entity implements Attackable, Waypoin
+     }
+ 
+     protected float getJumpPower(float multiplier) {
+-        return (float)this.getAttributeValue(Attributes.JUMP_STRENGTH) * multiplier * this.getBlockJumpFactor() + this.getJumpBoostPower();
++        return (float) this.getAttributeValue(Attributes.JUMP_STRENGTH) * multiplier * this.getBlockJumpFactor() + this.getJumpBoostPower();
+     }
+ 
+     public float getJumpBoostPower() {
+@@ -2897,6 +2923,7 @@ public abstract class LivingEntity extends Entity implements Attackable, Waypoin
+     }
+ 
+     protected long lastJumpTime = 0L; // Paper - Prevent excessive velocity through repeated crits
++
+     @VisibleForTesting
+     public void jumpFromGround() {
+         float jumpPower = this.getJumpPower();
+@@ -2907,17 +2934,17 @@ public abstract class LivingEntity extends Entity implements Attackable, Waypoin
+             boolean canCrit = true;
+             if (this instanceof net.minecraft.world.entity.player.Player) {
+                 canCrit = false;
+-                if (time - this.lastJumpTime > (long)(0.250e9)) {
++                if (time - this.lastJumpTime > (long) (0.250e9)) {
+                     this.lastJumpTime = time;
+                     canCrit = true;
+                 }
+             }
+             // Paper end - Prevent excessive velocity through repeated crits
+-            this.setDeltaMovement(deltaMovement.x, Math.max((double)jumpPower, deltaMovement.y), deltaMovement.z);
++            this.setDeltaMovement(deltaMovement.x, Math.max((double) jumpPower, deltaMovement.y), deltaMovement.z);
+             if (this.isSprinting()) {
+                 float f = this.getYRot() * (float) (Math.PI / 180.0);
+                 if (canCrit) // Paper - Prevent excessive velocity through repeated crits
+-                this.addDeltaMovement(new Vec3(-Mth.sin(f) * 0.2, 0.0, Mth.cos(f) * 0.2));
++                    this.addDeltaMovement(new Vec3(-Mth.sin(f) * 0.2, 0.0, Mth.cos(f) * 0.2));
+             }
+ 
+             this.hasImpulse = true;
+@@ -3013,7 +3040,7 @@ public abstract class LivingEntity extends Entity implements Attackable, Waypoin
+         if (this.isInWater()) {
+             float f = this.isSprinting() ? 0.9F : this.getWaterSlowDown();
+             float f1 = 0.02F;
+-            float f2 = (float)this.getAttributeValue(Attributes.WATER_MOVEMENT_EFFICIENCY);
++            float f2 = (float) this.getAttributeValue(Attributes.WATER_MOVEMENT_EFFICIENCY);
+             if (!this.onGround()) {
+                 f2 *= 0.5F;
+             }
+@@ -3077,8 +3104,8 @@ public abstract class LivingEntity extends Entity implements Attackable, Waypoin
+ 
+     public void stopFallFlying() {
+         if (!org.bukkit.craftbukkit.event.CraftEventFactory.callToggleGlideEvent(this, false).isCancelled()) { // Paper
+-        this.setSharedFlag(7, true);
+-        this.setSharedFlag(7, false);
++            this.setSharedFlag(7, true);
++            this.setSharedFlag(7, false);
+         } // Paper
+     }
+ 
+@@ -3112,9 +3139,9 @@ public abstract class LivingEntity extends Entity implements Attackable, Waypoin
+     private void handleFallFlyingCollisions(double oldSpeed, double newSpeed) {
+         if (this.horizontalCollision) {
+             double d = oldSpeed - newSpeed;
+-            float f = (float)(d * 10.0 - 3.0);
++            float f = (float) (d * 10.0 - 3.0);
+             if (f > 0.0F) {
+-                this.playSound(this.getFallDamageSound((int)f), 1.0F, 1.0F);
++                this.playSound(this.getFallDamageSound((int) f), 1.0F, 1.0F);
+                 this.hurt(this.damageSources().flyIntoWall(), f);
+             }
+         }
+@@ -3143,7 +3170,7 @@ public abstract class LivingEntity extends Entity implements Attackable, Waypoin
+     }
+ 
+     public void calculateEntityAnimation(boolean includeHeight) {
+-        float f = (float)Mth.length(this.getX() - this.xo, includeHeight ? this.getY() - this.yo : 0.0, this.getZ() - this.zo);
++        float f = (float) Mth.length(this.getX() - this.xo, includeHeight ? this.getY() - this.yo : 0.0, this.getZ() - this.zo);
+         if (!this.isPassenger() && this.isAlive()) {
+             this.updateWalkAnimation(f);
+         } else {
+@@ -3275,10 +3302,10 @@ public abstract class LivingEntity extends Entity implements Attackable, Waypoin
+ 
+         double d = this.getX() - this.xo;
+         double d1 = this.getZ() - this.zo;
+-        float f = (float)(d * d + d1 * d1);
++        float f = (float) (d * d + d1 * d1);
+         float f1 = this.yBodyRot;
+         if (f > 0.0025000002F) {
+-            float f2 = (float)Mth.atan2(d1, d) * (180.0F / (float)Math.PI) - 90.0F;
++            float f2 = (float) Mth.atan2(d1, d) * (180.0F / (float) Math.PI) - 90.0F;
+             float abs = Mth.abs(Mth.wrapDegrees(this.getYRot()) - f2);
+             if (95.0F < abs && abs < 265.0F) {
+                 f1 = f2 - 180.0F;
+@@ -3336,7 +3363,8 @@ public abstract class LivingEntity extends Entity implements Attackable, Waypoin
+     private Map<EquipmentSlot, ItemStack> collectEquipmentChanges() {
+         Map<EquipmentSlot, ItemStack> map = null;
+         // Paper start - EntityEquipmentChangedEvent
+-        record EquipmentChangeImpl(org.bukkit.inventory.ItemStack oldItem, org.bukkit.inventory.ItemStack newItem) implements io.papermc.paper.event.entity.EntityEquipmentChangedEvent.EquipmentChange {
++        record EquipmentChangeImpl(org.bukkit.inventory.ItemStack oldItem,
++                                   org.bukkit.inventory.ItemStack newItem) implements io.papermc.paper.event.entity.EntityEquipmentChangedEvent.EquipmentChange {
+             @Override
+             public org.bukkit.inventory.ItemStack oldItem() {
+                 return this.oldItem.clone();
+@@ -3410,7 +3438,7 @@ public abstract class LivingEntity extends Entity implements Attackable, Waypoin
+             && itemStack1 != null
+             && ItemStack.matches(itemStack, this.lastEquipmentItems.get(EquipmentSlot.OFFHAND))
+             && ItemStack.matches(itemStack1, this.lastEquipmentItems.get(EquipmentSlot.MAINHAND))) {
+-            ((ServerLevel)this.level()).getChunkSource().broadcast(this, new ClientboundEntityEventPacket(this, (byte)55));
++            ((ServerLevel) this.level()).getChunkSource().broadcast(this, new ClientboundEntityEventPacket(this, (byte) 55));
+             hands.remove(EquipmentSlot.MAINHAND);
+             hands.remove(EquipmentSlot.OFFHAND);
+             this.lastEquipmentItems.put(EquipmentSlot.MAINHAND, itemStack.copy());
+@@ -3425,7 +3453,7 @@ public abstract class LivingEntity extends Entity implements Attackable, Waypoin
+             list.add(Pair.of(equipmentSlot, itemStack1));
+             this.lastEquipmentItems.put(equipmentSlot, itemStack1);
+         });
+-        ((ServerLevel)this.level()).getChunkSource().broadcast(this, new ClientboundSetEquipmentPacket(this.getId(), list, true)); // Paper - data sanitization
++        ((ServerLevel) this.level()).getChunkSource().broadcast(this, new ClientboundSetEquipmentPacket(this.getId(), list, true)); // Paper - data sanitization
+     }
+ 
+     protected void tickHeadTurn(float yBodyRot) {
+@@ -3512,9 +3540,11 @@ public abstract class LivingEntity extends Entity implements Attackable, Waypoin
+                 if (!this.isInLava() || this.onGround() && !(fluidHeight > fluidJumpThreshold)) {
+                     if ((this.onGround() || flag && fluidHeight <= fluidJumpThreshold) && this.noJumpDelay == 0) {
+                         if (new com.destroystokyo.paper.event.entity.EntityJumpEvent(getBukkitLivingEntity()).callEvent()) { // Paper - Entity Jump API
+-                        this.jumpFromGround();
+-                        this.noJumpDelay = 10;
+-                        } else { this.setJumping(false); } // Paper - Entity Jump API; setJumping(false) stops a potential loop
++                            this.jumpFromGround();
++                            this.noJumpDelay = 10;
++                        } else {
++                            this.setJumping(false);
++                        } // Paper - Entity Jump API; setJumping(false) stops a potential loop
+                     }
+                 } else {
+                     this.jumpInLiquid(FluidTags.LAVA);
+@@ -3613,7 +3643,7 @@ public abstract class LivingEntity extends Entity implements Attackable, Waypoin
+         if (!this.level().isClientSide) {
+             if (!this.canGlide()) {
+                 if (this.getSharedFlag(7) != false && !CraftEventFactory.callToggleGlideEvent(this, false).isCancelled()) // CraftBukkit
+-                this.setSharedFlag(7, false);
++                    this.setSharedFlag(7, false);
+                 return;
+             }
+ 
+@@ -3723,13 +3753,14 @@ public abstract class LivingEntity extends Entity implements Attackable, Waypoin
+                         continue;
+                     }
+                     // Paper end - entity attempt spin attack event / hidden entities - skip hidden entities
+-                    this.doAutoAttackOnTouch((LivingEntity)entity);
++                    this.doAutoAttackOnTouch((LivingEntity) entity);
+                     this.autoSpinAttackTicks = 0;
+                     this.setDeltaMovement(this.getDeltaMovement().scale(-0.2));
+                     break;
+                 }
+             }
+-        } if (this.horizontalCollision && skippedAttackedEntitiesCounter == entities.size()) { // Paper - entity attempt spin attack event - only check if above list was either empty (size is 0, counter is 0 because of it) or filled completely with skipped entities.
++        }
++        if (this.horizontalCollision && skippedAttackedEntitiesCounter == entities.size()) { // Paper - entity attempt spin attack event - only check if above list was either empty (size is 0, counter is 0 because of it) or filled completely with skipped entities.
+             this.autoSpinAttackTicks = 0;
+         }
+ 
+@@ -3791,7 +3822,7 @@ public abstract class LivingEntity extends Entity implements Attackable, Waypoin
+     public void onItemPickup(ItemEntity itemEntity) {
+         Entity owner = EntityReference.get(itemEntity.thrower, this.level()::getGlobalPlayerByUUID, Entity.class); // Paper - check global player list where appropriate
+         if (owner instanceof ServerPlayer) {
+-            CriteriaTriggers.THROWN_ITEM_PICKED_UP_BY_ENTITY.trigger((ServerPlayer)owner, itemEntity.getItem(), this);
++            CriteriaTriggers.THROWN_ITEM_PICKED_UP_BY_ENTITY.trigger((ServerPlayer) owner, itemEntity.getItem(), this);
+         }
+     }
+ 
+@@ -3799,7 +3830,7 @@ public abstract class LivingEntity extends Entity implements Attackable, Waypoin
+         if (!entity.isRemoved()
+             && !this.level().isClientSide
+             && (entity instanceof ItemEntity || entity instanceof AbstractArrow || entity instanceof ExperienceOrb)) {
+-            ((ServerLevel)this.level()).getChunkSource().broadcastAndSend(this, new ClientboundTakeItemEntityPacket(entity.getId(), this.getId(), amount)); // Paper - broadcast with collector as source
++            ((ServerLevel) this.level()).getChunkSource().broadcastAndSend(this, new ClientboundTakeItemEntityPacket(entity.getId(), this.getId(), amount)); // Paper - broadcast with collector as source
+         }
+     }
+ 
+@@ -3916,10 +3947,12 @@ public abstract class LivingEntity extends Entity implements Attackable, Waypoin
+     public void resyncUsingItem(ServerPlayer serverPlayer) {
+         this.resendPossiblyDesyncedDataValues(java.util.List.of(DATA_LIVING_ENTITY_FLAGS), serverPlayer);
+     }
++
+     // Paper end - Properly cancel usable items
+     // Paper start - lag compensate eating
+     protected long eatStartTime;
+     protected int totalEatTimeTicks;
++
+     // Paper end - lag compensate eating
+     private void updatingUsingItem() {
+         if (this.isUsingItem()) {
+@@ -4001,7 +4034,7 @@ public abstract class LivingEntity extends Entity implements Attackable, Waypoin
+             i &= ~key;
+         }
+ 
+-        this.entityData.set(DATA_LIVING_ENTITY_FLAGS, (byte)i);
++        this.entityData.set(DATA_LIVING_ENTITY_FLAGS, (byte) i);
+     }
+ 
+     public void startUsingItem(InteractionHand hand) {
+@@ -4144,7 +4177,8 @@ public abstract class LivingEntity extends Entity implements Attackable, Waypoin
+         ItemStack itemInHand = this.getItemInHand(this.getUsedItemHand());
+         if (!this.useItem.isEmpty() && ItemStack.isSameItem(itemInHand, this.useItem)) {
+             this.useItem = itemInHand;
+-            if (this instanceof ServerPlayer) new io.papermc.paper.event.player.PlayerStopUsingItemEvent((org.bukkit.entity.Player) getBukkitEntity(), useItem.asBukkitMirror(), getTicksUsingItem()).callEvent(); // Paper - Add PlayerStopUsingItemEvent
++            if (this instanceof ServerPlayer)
++                new io.papermc.paper.event.player.PlayerStopUsingItemEvent((org.bukkit.entity.Player) getBukkitEntity(), useItem.asBukkitMirror(), getTicksUsingItem()).callEvent(); // Paper - Add PlayerStopUsingItemEvent
+             this.useItem.releaseUsing(this.level(), this, this.getUseItemRemainingTicks());
+             if (this.useItem.useOnRelease()) {
+                 this.updatingUsingItem();
+@@ -4326,7 +4360,7 @@ public abstract class LivingEntity extends Entity implements Attackable, Waypoin
+             return Optional.of(false); // CraftBukkit
+         } else {
+             if (broadcastTeleport) {
+-                level.broadcastEntityEvent(this, (byte)46);
++                level.broadcastEntityEvent(this, (byte) 46);
+             }
+ 
+             if (this instanceof PathfinderMob pathfinderMob) {
+@@ -4432,7 +4466,7 @@ public abstract class LivingEntity extends Entity implements Attackable, Waypoin
+                     return new Vec3(blockPos1.getX() + 0.5, blockPos1.getY() + 0.1, blockPos1.getZ() + 0.5);
+                 });
+                 Vec3 vec32 = Vec3.atBottomCenterOf(blockPos).subtract(vec31).normalize();
+-                float f = (float)Mth.wrapDegrees(Mth.atan2(vec32.z, vec32.x) * 180.0F / (float)Math.PI - 90.0);
++                float f = (float) Mth.wrapDegrees(Mth.atan2(vec32.z, vec32.x) * 180.0F / (float) Math.PI - 90.0);
+                 this.setPos(vec31.x, vec31.y, vec31.z);
+                 this.setYRot(f);
+                 this.setXRot(0.0F);
+@@ -4607,7 +4641,7 @@ public abstract class LivingEntity extends Entity implements Attackable, Waypoin
+ 
+     @Override
+     public float maxUpStep() {
+-        float f = (float)this.getAttributeValue(Attributes.STEP_HEIGHT);
++        float f = (float) this.getAttributeValue(Attributes.STEP_HEIGHT);
+         return this.getControllingPassenger() instanceof Player ? Math.max(f, 1.0F) : f;
+     }
+ 
+@@ -4617,7 +4651,7 @@ public abstract class LivingEntity extends Entity implements Attackable, Waypoin
+     }
+ 
+     protected void lerpHeadRotationStep(int lerpHeadSteps, double lerpYHeadRot) {
+-        this.yHeadRot = (float)Mth.rotLerp(1.0 / lerpHeadSteps, (double)this.yHeadRot, lerpYHeadRot);
++        this.yHeadRot = (float) Mth.rotLerp(1.0 / lerpHeadSteps, (double) this.yHeadRot, lerpYHeadRot);
+     }
+ 
+     @Override
+diff --git a/net/minecraft/world/level/ServerExplosion.java b/net/minecraft/world/level/ServerExplosion.java
+index 589f53f55c81702eaec701cd1de07b47368dadb0..6afcb50d3ea9974e210da068e97f17f23692c701 100644
+--- a/net/minecraft/world/level/ServerExplosion.java
++++ b/net/minecraft/world/level/ServerExplosion.java
+@@ -3,11 +3,9 @@ package net.minecraft.world.level;
+ import it.unimi.dsi.fastutil.objects.ObjectArrayList;
+ import java.util.ArrayList;
+ import java.util.HashMap;
+-import java.util.HashSet;
+ import java.util.List;
+ import java.util.Map;
+ import java.util.Optional;
+-import java.util.Set;
+ import javax.annotation.Nullable;
+ import net.minecraft.Util;
+ import net.minecraft.core.BlockPos;
+@@ -20,6 +18,8 @@ import net.minecraft.world.entity.Entity;
+ import net.minecraft.world.entity.EntityType;
+ import net.minecraft.world.entity.LivingEntity;
+ import net.minecraft.world.entity.ai.attributes.Attributes;
++import net.minecraft.world.entity.boss.EnderDragonPart;
++import net.minecraft.world.entity.boss.enderdragon.EnderDragon;
+ import net.minecraft.world.entity.item.ItemEntity;
+ import net.minecraft.world.entity.item.PrimedTnt;
+ import net.minecraft.world.entity.player.Player;
+@@ -32,13 +32,9 @@ import net.minecraft.world.level.material.FluidState;
+ import net.minecraft.world.phys.AABB;
+ import net.minecraft.world.phys.HitResult;
+ import net.minecraft.world.phys.Vec3;
+-
+-// CraftBukkit start
+-import net.minecraft.world.entity.boss.EnderDragonPart;
+-import net.minecraft.world.entity.boss.enderdragon.EnderDragon;
++import org.bukkit.Location;
+ import org.bukkit.craftbukkit.event.CraftEventFactory;
+ import org.bukkit.craftbukkit.util.CraftLocation;
+-import org.bukkit.Location;
+ // CraftBukkit end
+ 
+ public class ServerExplosion implements Explosion {
+@@ -386,6 +382,7 @@ public class ServerExplosion implements Explosion {
+     private List<BlockPos> calculateExplodedPositions() {
+         // Paper start - collision optimisations
+         final ObjectArrayList<BlockPos> ret = new ObjectArrayList<>();
++        final it.unimi.dsi.fastutil.objects.ObjectOpenHashSet<net.minecraft.core.BlockPos> visitedPositions = new it.unimi.dsi.fastutil.objects.ObjectOpenHashSet<>();
+ 
+         final Vec3 center = this.center;
+ 
+@@ -445,6 +442,9 @@ public class ServerExplosion implements Explosion {
+                 if (cachedBlock.outOfWorld) {
+                     break;
+                 }
++
++                visitedPositions.add(cachedBlock.immutablePos);
++
+                 final BlockState iblockdata = cachedBlock.blockState;
+ 
+                 power -= cachedBlock.resistance;
+@@ -478,6 +478,9 @@ public class ServerExplosion implements Explosion {
+             } while (power > 0.0f);
+         }
+ 
++        org.bukkit.craftbukkit.CraftCoreHider coreHider = (org.bukkit.craftbukkit.CraftCoreHider) org.bukkit.Bukkit.getCoreHider();
++        coreHider.notifyBlocksDestroyed(this.level.getWorld(), new BlockPos((int) this.center.x, (int) this.center.y, (int) this.center.z), visitedPositions);
++
+         return ret;
+         // Paper end - collision optimisations
+     }
+@@ -629,10 +632,6 @@ public class ServerExplosion implements Explosion {
+                 .onExplosionHit(this.level, blockPos, this, (itemStack, blockPos1) -> addOrAppendStack(list, itemStack, blockPos1));
+         }
+ 
+-        if (!blocks.isEmpty()) {
+-            net.minecraft.server.level.HullHider.notifyBlocksDestroyed(this.level.getWorld(), blocks);
+-        }
+-
+         for (ServerExplosion.StackCollector stackCollector : list) {
+             Block.popResource(this.level, stackCollector.pos, stackCollector.stack);
+         }
+diff --git a/net/minecraft/world/level/chunk/LevelChunkSection.java b/net/minecraft/world/level/chunk/LevelChunkSection.java
+index 00a9cac89d5fc9bcbf07696fe8d3f63191fc1ed8..9ba83521d09b23001fa0ee9873b342dfc2d32945 100644
+--- a/net/minecraft/world/level/chunk/LevelChunkSection.java
++++ b/net/minecraft/world/level/chunk/LevelChunkSection.java
+@@ -69,7 +69,7 @@ public class LevelChunkSection implements ca.spottedleaf.moonrise.patches.block_
+     }
+     public LevelChunkSection(Registry<Biome> biomeRegistry, net.minecraft.world.level.Level level, net.minecraft.world.level.ChunkPos chunkPos, int chunkSectionY) {
+         // Paper end - Anti-Xray
+-        this.states = new PalettedContainer<>(Block.BLOCK_STATE_REGISTRY, Blocks.AIR.defaultBlockState(), PalettedContainer.Strategy.SECTION_STATES, net.minecraft.server.level.Techhider.getHiderPreset()); // Paper - Anti-Xray - Add preset block states
++        this.states = new PalettedContainer<>(Block.BLOCK_STATE_REGISTRY, Blocks.AIR.defaultBlockState(), PalettedContainer.Strategy.SECTION_STATES, org.bukkit.craftbukkit.BlockHider.getHiderPreset()); // Paper - Anti-Xray - Add preset block states
+         this.biomes = new PalettedContainer<>(biomeRegistry.asHolderIdMap(), biomeRegistry.getOrThrow(Biomes.PLAINS), PalettedContainer.Strategy.SECTION_BIOMES, null); // Paper - Anti-Xray - Add preset biomes
+     }
+ 
+diff --git a/net/minecraft/world/level/chunk/PalettedContainer.java b/net/minecraft/world/level/chunk/PalettedContainer.java
+index fb5ddd9a97428905cb359d154c15f35d1b6bb626..eeba1b121e4dd09cc1ef390ba9163247f9de89b5 100644
+--- a/net/minecraft/world/level/chunk/PalettedContainer.java
++++ b/net/minecraft/world/level/chunk/PalettedContainer.java
+@@ -20,7 +20,6 @@ import net.minecraft.util.BitStorage;
+ import net.minecraft.util.ExtraCodecs;
+ import net.minecraft.util.Mth;
+ import net.minecraft.util.SimpleBitStorage;
+-import net.minecraft.util.ThreadingDetector;
+ import net.minecraft.util.ZeroBitStorage;
+ 
+ public class PalettedContainer<T> implements PaletteResize<T>, PalettedContainerRO<T> {
+diff --git a/net/minecraft/world/level/chunk/storage/SerializableChunkData.java b/net/minecraft/world/level/chunk/storage/SerializableChunkData.java
+index 4e45eba54a69a1152252f4c115ace221134dfede..504c972256ad9d10c82797d4749c3a682e8bb291 100644
+--- a/net/minecraft/world/level/chunk/storage/SerializableChunkData.java
++++ b/net/minecraft/world/level/chunk/storage/SerializableChunkData.java
+@@ -72,6 +72,7 @@ import net.minecraft.world.level.storage.TagValueInput;
+ import net.minecraft.world.ticks.LevelChunkTicks;
+ import net.minecraft.world.ticks.ProtoChunkTicks;
+ import net.minecraft.world.ticks.SavedTick;
++import org.bukkit.craftbukkit.BlockHider;
+ import org.slf4j.Logger;
+ 
+ public record SerializableChunkData(
+@@ -205,7 +206,7 @@ public record SerializableChunkData(
+                     int byteOr = compoundTag.getByteOr("Y", (byte)0);
+                     LevelChunkSection levelChunkSection;
+                     if (byteOr >= levelHeightAccessor.getMinSectionY() && byteOr <= levelHeightAccessor.getMaxSectionY()) {
+-                        final BlockState[] presetBlockStates = net.minecraft.server.level.Techhider.getHiderPreset(); // Paper - Anti-Xray - Add preset block states
++                        final BlockState[] presetBlockStates = BlockHider.getHiderPreset(); // Paper - Anti-Xray - Add preset block states
+                         final Codec<PalettedContainer<BlockState>> blockStateCodec = PalettedContainer.codecRW(Block.BLOCK_STATE_REGISTRY, BlockState.CODEC, PalettedContainer.Strategy.SECTION_STATES, Blocks.AIR.defaultBlockState(), presetBlockStates); // Paper - Anti-Xray
+                         PalettedContainer<BlockState> palettedContainer = compoundTag.getCompound("block_states")
+                             .map(

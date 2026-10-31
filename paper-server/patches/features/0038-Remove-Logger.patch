@@ -1,0 +1,18 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: pandatestus <hendrikrinas14@gmail.com>
+Date: Sat, 31 Oct 2026 01:47:50 +0100
+Subject: [PATCH] Remove Logger
+
+
+diff --git a/net/minecraft/server/network/ServerCommonPacketListenerImpl.java b/net/minecraft/server/network/ServerCommonPacketListenerImpl.java
+index 65a129a4e41b3ea688d6a0163dc024bd26464a8a..e1b4d4f3b69fe9add502fa176a873187cd372693 100644
+--- a/net/minecraft/server/network/ServerCommonPacketListenerImpl.java
++++ b/net/minecraft/server/network/ServerCommonPacketListenerImpl.java
+@@ -309,7 +309,6 @@ public abstract class ServerCommonPacketListenerImpl implements net.minecraft.ne
+ 
+                 if (org.bukkit.craftbukkit.BlockHider.shouldHide(player, material, blockUpdatePacket.getPos()) || hullHide) {
+                     if(coreHider.shouldHideSign(serverPlayer, blockUpdatePacket.getPos())) {
+-                        net.minecraft.server.MinecraftServer.LOGGER.info("hidden block at " + blockUpdatePacket.getPos());
+                         packet = new net.minecraft.network.protocol.game.ClientboundBlockUpdatePacket(blockUpdatePacket.getPos(), org.bukkit.craftbukkit.BlockHider.getState(player));
+                     }
+                 }
