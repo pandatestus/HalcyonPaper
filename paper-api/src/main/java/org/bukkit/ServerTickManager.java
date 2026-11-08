@@ -54,7 +54,7 @@ public interface ServerTickManager {
      * Sets the tick rate of the server.
      * <p>
      * The normal tick rate of the server is 20. No tick rate below 1.0F or
-     * above 10,000 can be applied to the server.
+     * above 100,001 can be applied to the server.
      *
      * @param tick the tick rate to set the server to
      * @throws IllegalArgumentException if tick rate is too low or too high for
