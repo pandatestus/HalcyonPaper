@@ -36,6 +36,7 @@ public class SignHider {
     }
 
     public static CompoundTag modifyNBT(ServerPlayer player, CompoundTag nbt) {
+
         try {
             CompoundTag frontText = new CompoundTag();
             CompoundTag backText = new CompoundTag();

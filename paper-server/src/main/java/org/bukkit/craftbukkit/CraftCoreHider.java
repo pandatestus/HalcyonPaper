@@ -703,7 +703,7 @@ public class CraftCoreHider implements CoreHider {
     private static boolean flushScheduled = false;
 
     public void notifyBlocksDestroyed(World world, BlockPos origin, Collection<BlockPos> destroyedPositions) {
-        if (blue == null && red == null) return;
+        if (blue == null || red == null) return;
 
         ServerLevel level = ((CraftWorld) world).getHandle();
         destroyedPositions.add(origin);
